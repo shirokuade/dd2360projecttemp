@@ -46,8 +46,8 @@ __global__ void render_init(int max_x, int max_y, curandState *rand_state) {
 }
 
 
-// Creates Conell Box
-__global__ void create_world(hitable **d_list, hitable **d_world) {
+// Creates Cornell Box
+__global__ void create_world(hittable **d_list, hittable **d_world) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         int i = 0;
         material *red   = new lambertian( new constant_texture(vec3(0.65, 0.05, 0.05)) );
@@ -70,7 +70,7 @@ __global__ void create_world(hitable **d_list, hitable **d_world) {
 }
 
 
-__device__ vec3 ray_color(const ray& r, hitable **world, curandState *local_rand_state) {
+__device__ vec3 ray_color(const ray& r, hittable **world, curandState *local_rand_state) {
     ray cur_ray = r;
     vec3 cur_attenuation(1.0, 1.0, 1.0);
     vec3 cur_emitted(0.0, 0.0, 0.0);
@@ -78,7 +78,7 @@ __device__ vec3 ray_color(const ray& r, hitable **world, curandState *local_rand
     // Changed from recursive to for-loop based for GPU
     for(int i = 0; i < 50; i++) {
         hit_record rec;
-        if ((*world)->hit(cur_ray, 0.001f, FLT_MAX, rec)) {
+        if ((*world)->hit(cur_ray, interval(0.001, 1e30), rec)) {
             vec3 emitted = rec.mat_ptr->emitted(rec.u, rec.v, rec.p);
             cur_emitted += cur_attenuation * emitted; // Accumulate emission
             
@@ -97,7 +97,7 @@ __device__ vec3 ray_color(const ray& r, hitable **world, curandState *local_rand
     return cur_emitted; // Exceeded max depth
 }
 
-__global__ void render(vec3 *fb, int max_x, int max_y, int ns, CameraData cam, hitable **world, curandState *rand_state) {
+__global__ void render(vec3 *fb, int max_x, int max_y, int ns, CameraData cam, hittable **world, curandState *rand_state) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     int j = threadIdx.y + blockIdx.y * blockDim.y;
 
@@ -152,10 +152,10 @@ int main() {
     // Set Heap Size large enough
     checkCudaErrors(cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1024 * 1024 * 100)); // 100MB heap
 
-    hitable **d_list;
-    checkCudaErrors(cudaMalloc((void **)&d_list, 20 * sizeof(hitable *))); // Array for list items
-    hitable **d_world;
-    checkCudaErrors(cudaMalloc((void **)&d_world, sizeof(hitable *)));     // Pointer to the list itself
+    hittable **d_list;
+    checkCudaErrors(cudaMalloc((void **)&d_list, 20 * sizeof(hittable *))); // Array for list items
+    hittable **d_world;
+    checkCudaErrors(cudaMalloc((void **)&d_world, sizeof(hittable *)));     // Pointer to the list itself
 
     create_world<<<1, 1>>>(d_list, d_world);
     checkCudaErrors(cudaGetLastError());

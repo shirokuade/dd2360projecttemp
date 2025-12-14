@@ -12,107 +12,178 @@
 #include "hittable.h"
 #include "hittable_list.h"
 
-// Everythng is used
-
-class quad : public hittable {
+// Axis-aligned rectangle in XY plane
+class xy_rect : public hittable {
   public:
-    quad(const point3& Q, const vec3& u, const vec3& v, shared_ptr<material> mat)
-      : Q(Q), u(u), v(v), mat(mat)
-    {
-        auto n = cross(u, v);
-        normal = unit_vector(n);
-        D = dot(normal, Q);
-        w = n / dot(n,n);
+    material *mp;
+    double x0, x1, y0, y1, k;
 
-        set_bounding_box();
-    }
+    __device__ xy_rect() {}
+    __device__ xy_rect(double _x0, double _x1, double _y0, double _y1, double _k, material *mat)
+        : x0(_x0), x1(_x1), y0(_y0), y1(_y1), k(_k), mp(mat) {}
 
-    virtual void set_bounding_box() {
-        // Compute the bounding box of all four vertices.
-        auto bbox_diagonal1 = aabb(Q, Q + u + v);
-        auto bbox_diagonal2 = aabb(Q + u, Q + v);
-        bbox = aabb(bbox_diagonal1, bbox_diagonal2);
-    }
-
-    aabb bounding_box() const override { return bbox; }
-
-    bool hit(const ray& r, interval ray_t, hit_record& rec) const override {
-        auto denom = dot(normal, r.direction());
-
-        // No hit if the ray is parallel to the plane.
-        if (std::fabs(denom) < 1e-8)
+    __device__ bool hit(const ray& r, interval ray_t, hit_record& rec) const override {
+        auto t = (k - r.origin().z()) / r.direction().z();
+        if (t < ray_t.min || t > ray_t.max)
             return false;
 
-        // Return false if the hit point parameter t is outside the ray interval.
-        auto t = (D - dot(normal, r.origin())) / denom;
-        if (!ray_t.contains(t))
+        auto x = r.origin().x() + t * r.direction().x();
+        auto y = r.origin().y() + t * r.direction().y();
+        if (x < x0 || x > x1 || y < y0 || y > y1)
             return false;
 
-        // Determine if the hit point lies within the planar shape using its plane coordinates.
-        auto intersection = r.at(t);
-        vec3 planar_hitpt_vector = intersection - Q;
-        auto alpha = dot(w, cross(planar_hitpt_vector, v));
-        auto beta = dot(w, cross(u, planar_hitpt_vector));
-
-        if (!is_interior(alpha, beta, rec))
-            return false;
-
-        // Ray hits the 2D shape; set the rest of the hit record and return true.
+        rec.u = (x - x0) / (x1 - x0);
+        rec.v = (y - y0) / (y1 - y0);
         rec.t = t;
-        rec.p = intersection;
-        rec.mat = mat;
-        rec.set_face_normal(r, normal);
-
+        vec3 outward_normal = vec3(0, 0, 1);
+        rec.set_face_normal(r, outward_normal);
+        rec.mat_ptr = mp;
+        rec.p = r.at(t);
         return true;
     }
 
-    virtual bool is_interior(double a, double b, hit_record& rec) const {
-        interval unit_interval = interval(0, 1);
-        // Given the hit point in plane coordinates, return false if it is outside the
-        // primitive, otherwise set the hit record UV coordinates and return true.
-
-        if (!unit_interval.contains(a) || !unit_interval.contains(b))
-            return false;
-
-        rec.u = a;
-        rec.v = b;
-        return true;
+    __device__ aabb bounding_box() const override {
+        return aabb(point3(x0, y0, k - 0.0001), point3(x1, y1, k + 0.0001));
     }
-
-  private:
-    point3 Q;
-    vec3 u, v;
-    vec3 w;
-    shared_ptr<material> mat;
-    aabb bbox;
-    vec3 normal;
-    double D;
 };
 
+// Axis-aligned rectangle in XZ plane
+class xz_rect : public hittable {
+  public:
+    material *mp;
+    double x0, x1, z0, z1, k;
 
-inline shared_ptr<hittable_list> box(const point3& a, const point3& b, shared_ptr<material> mat)
-{
-    // Returns the 3D box (six sides) that contains the two opposite vertices a & b.
+    __device__ xz_rect() {}
+    __device__ xz_rect(double _x0, double _x1, double _z0, double _z1, double _k, material *mat)
+        : x0(_x0), x1(_x1), z0(_z0), z1(_z1), k(_k), mp(mat) {}
 
-    auto sides = make_shared<hittable_list>();
+    __device__ bool hit(const ray& r, interval ray_t, hit_record& rec) const override {
+        auto t = (k - r.origin().y()) / r.direction().y();
+        if (t < ray_t.min || t > ray_t.max)
+            return false;
 
-    // Construct the two opposite vertices with the minimum and maximum coordinates.
-    auto min = point3(std::fmin(a.x(),b.x()), std::fmin(a.y(),b.y()), std::fmin(a.z(),b.z()));
-    auto max = point3(std::fmax(a.x(),b.x()), std::fmax(a.y(),b.y()), std::fmax(a.z(),b.z()));
+        auto x = r.origin().x() + t * r.direction().x();
+        auto z = r.origin().z() + t * r.direction().z();
+        if (x < x0 || x > x1 || z < z0 || z > z1)
+            return false;
 
-    auto dx = vec3(max.x() - min.x(), 0, 0);
-    auto dy = vec3(0, max.y() - min.y(), 0);
-    auto dz = vec3(0, 0, max.z() - min.z());
+        rec.u = (x - x0) / (x1 - x0);
+        rec.v = (z - z0) / (z1 - z0);
+        rec.t = t;
+        vec3 outward_normal = vec3(0, 1, 0);
+        rec.set_face_normal(r, outward_normal);
+        rec.mat_ptr = mp;
+        rec.p = r.at(t);
+        return true;
+    }
 
-    sides->add(make_shared<quad>(point3(min.x(), min.y(), max.z()),  dx,  dy, mat)); // front
-    sides->add(make_shared<quad>(point3(max.x(), min.y(), max.z()), -dz,  dy, mat)); // right
-    sides->add(make_shared<quad>(point3(max.x(), min.y(), min.z()), -dx,  dy, mat)); // back
-    sides->add(make_shared<quad>(point3(min.x(), min.y(), min.z()),  dz,  dy, mat)); // left
-    sides->add(make_shared<quad>(point3(min.x(), max.y(), max.z()),  dx, -dz, mat)); // top
-    sides->add(make_shared<quad>(point3(min.x(), min.y(), min.z()),  dx,  dz, mat)); // bottom
+    __device__ aabb bounding_box() const override {
+        return aabb(point3(x0, k - 0.0001, z0), point3(x1, k + 0.0001, z1));
+    }
+};
 
-    return sides;
-}
+// Axis-aligned rectangle in YZ plane
+class yz_rect : public hittable {
+  public:
+    material *mp;
+    double y0, y1, z0, z1, k;
 
+    __device__ yz_rect() {}
+    __device__ yz_rect(double _y0, double _y1, double _z0, double _z1, double _k, material *mat)
+        : y0(_y0), y1(_y1), z0(_z0), z1(_z1), k(_k), mp(mat) {}
+
+    __device__ bool hit(const ray& r, interval ray_t, hit_record& rec) const override {
+        auto t = (k - r.origin().x()) / r.direction().x();
+        if (t < ray_t.min || t > ray_t.max)
+            return false;
+
+        auto y = r.origin().y() + t * r.direction().y();
+        auto z = r.origin().z() + t * r.direction().z();
+        if (y < y0 || y > y1 || z < z0 || z > z1)
+            return false;
+
+        rec.u = (y - y0) / (y1 - y0);
+        rec.v = (z - z0) / (z1 - z0);
+        rec.t = t;
+        vec3 outward_normal = vec3(1, 0, 0);
+        rec.set_face_normal(r, outward_normal);
+        rec.mat_ptr = mp;
+        rec.p = r.at(t);
+        return true;
+    }
+
+    __device__ aabb bounding_box() const override {
+        return aabb(point3(k - 0.0001, y0, z0), point3(k + 0.0001, y1, z1));
+    }
+};
+
+// Wrapper to flip normals (for inside-facing surfaces)
+class flip_normals : public hittable {
+  public:
+    hittable *ptr;
+
+    __device__ flip_normals(hittable *p) : ptr(p) {}
+
+    __device__ bool hit(const ray& r, interval ray_t, hit_record& rec) const override {
+        if (!ptr->hit(r, ray_t, rec))
+            return false;
+
+        rec.front_face = !rec.front_face;
+        rec.normal = -rec.normal;
+        return true;
+    }
+
+    __device__ aabb bounding_box() const override {
+        return ptr->bounding_box();
+    }
+};
+
+// Box (6 sides) - returns a hittable_list containing 6 rectangles
+class box : public hittable {
+  public:
+    hittable **sides;
+    int num_sides;
+    aabb bbox;
+
+    __device__ box() {}
+    __device__ box(const point3& p0, const point3& p1, material *mat) {
+        num_sides = 6;
+        sides = new hittable*[6];
+
+        auto min_pt = point3(fmin(p0.x(), p1.x()), fmin(p0.y(), p1.y()), fmin(p0.z(), p1.z()));
+        auto max_pt = point3(fmax(p0.x(), p1.x()), fmax(p0.y(), p1.y()), fmax(p0.z(), p1.z()));
+
+        // Front and back (XY planes)
+        sides[0] = new xy_rect(min_pt.x(), max_pt.x(), min_pt.y(), max_pt.y(), max_pt.z(), mat);
+        sides[1] = new flip_normals(new xy_rect(min_pt.x(), max_pt.x(), min_pt.y(), max_pt.y(), min_pt.z(), mat));
+
+        // Top and bottom (XZ planes)
+        sides[2] = new xz_rect(min_pt.x(), max_pt.x(), min_pt.z(), max_pt.z(), max_pt.y(), mat);
+        sides[3] = new flip_normals(new xz_rect(min_pt.x(), max_pt.x(), min_pt.z(), max_pt.z(), min_pt.y(), mat));
+
+        // Left and right (YZ planes)
+        sides[4] = new yz_rect(min_pt.y(), max_pt.y(), min_pt.z(), max_pt.z(), max_pt.x(), mat);
+        sides[5] = new flip_normals(new yz_rect(min_pt.y(), max_pt.y(), min_pt.z(), max_pt.z(), min_pt.x(), mat));
+
+        bbox = aabb(min_pt, max_pt);
+    }
+
+    __device__ bool hit(const ray& r, interval ray_t, hit_record& rec) const override {
+        hit_record temp_rec;
+        bool hit_anything = false;
+        auto closest_so_far = ray_t.max;
+
+        for (int i = 0; i < num_sides; i++) {
+            if (sides[i]->hit(r, interval(ray_t.min, closest_so_far), temp_rec)) {
+                hit_anything = true;
+                closest_so_far = temp_rec.t;
+                rec = temp_rec;
+            }
+        }
+        return hit_anything;
+    }
+
+    __device__ aabb bounding_box() const override { return bbox; }
+};
 
 #endif

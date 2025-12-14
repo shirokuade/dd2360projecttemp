@@ -12,18 +12,14 @@
 //==============================================================================================
 
 #include "aabb.h"
-#include <memory>
-#include <cmath>
 
 class material;
-
-// Everything used
 
 class hit_record {
   public:
     point3 p;
     vec3 normal;
-    material *mat_ptr;    
+    material *mat_ptr;
     double t;
     double u;
     double v;
@@ -41,24 +37,28 @@ class hit_record {
 
 class hittable {
   public:
-    __host__ __device__ virtual ~hittable() = default;
+    __device__ virtual ~hittable() = default;
 
-    __host__ __device__ virtual bool hit(const ray& r, interval ray_t, hit_record& rec) const = 0;
+    __device__ virtual bool hit(const ray& r, interval ray_t, hit_record& rec) const = 0;
 
-    __host__ __device__ virtual aabb bounding_box() const = 0;
+    __device__ virtual aabb bounding_box() const = 0;
 };
 
 
 class translate : public hittable {
   public:
-    __host__ __device__
-    translate(std::shared_ptr<hittable> object, const vec3& offset)
-      : object(object), offset(offset)
+    hittable *object;
+    vec3 offset;
+    aabb bbox;
+
+    __device__
+    translate(hittable *obj, const vec3& displacement)
+      : object(obj), offset(displacement)
     {
         bbox = object->bounding_box() + offset;
     }
 
-    __host__ __device__ bool hit(const ray& r, interval ray_t, hit_record& rec) const override {
+    __device__ bool hit(const ray& r, interval ray_t, hit_record& rec) const override {
         // Move the ray backwards by the offset
         ray offset_r(r.origin() - offset, r.direction(), r.time());
 
@@ -72,26 +72,26 @@ class translate : public hittable {
         return true;
     }
 
-    __host__ __device__ aabb bounding_box() const override { return bbox; }
-
-  private:
-    std::shared_ptr<hittable> object;
-    vec3 offset;
-    aabb bbox;
+    __device__ aabb bounding_box() const override { return bbox; }
 };
 
 
 class rotate_y : public hittable {
   public:
-    __host__ __device__
-    rotate_y(std::shared_ptr<hittable> object, double angle) : object(object) {
-        auto radians = degrees_to_radians(angle);
-        sin_theta = std::sin(radians);
-        cos_theta = std::cos(radians);
+    hittable *object;
+    double sin_theta;
+    double cos_theta;
+    aabb bbox;
+
+    __device__
+    rotate_y(hittable *obj, double angle) : object(obj) {
+        auto radians = angle * 3.1415926535897932385 / 180.0;
+        sin_theta = sin(radians);
+        cos_theta = cos(radians);
         bbox = object->bounding_box();
 
-        point3 min( infinity,  infinity,  infinity);
-        point3 max(-infinity, -infinity, -infinity);
+        point3 min( 1e30,  1e30,  1e30);
+        point3 max(-1e30, -1e30, -1e30);
 
         for (int i = 0; i < 2; i++) {
             for (int j = 0; j < 2; j++) {
@@ -106,8 +106,8 @@ class rotate_y : public hittable {
                     vec3 tester(newx, y, newz);
 
                     for (int c = 0; c < 3; c++) {
-                        min[c] = std::fmin(min[c], tester[c]);
-                        max[c] = std::fmax(max[c], tester[c]);
+                        min[c] = fmin(min[c], tester[c]);
+                        max[c] = fmax(max[c], tester[c]);
                     }
                 }
             }
@@ -116,7 +116,7 @@ class rotate_y : public hittable {
         bbox = aabb(min, max);
     }
 
-    __host__ __device__ bool hit(const ray& r, interval ray_t, hit_record& rec) const override {
+    __device__ bool hit(const ray& r, interval ray_t, hit_record& rec) const override {
 
         // Transform the ray from world space to object space.
 
@@ -156,13 +156,7 @@ class rotate_y : public hittable {
         return true;
     }
 
-    __host__ __device__ aabb bounding_box() const override { return bbox; }
-
-  private:
-    std::shared_ptr<hittable> object;
-    double sin_theta;
-    double cos_theta;
-    aabb bbox;
+    __device__ aabb bounding_box() const override { return bbox; }
 };
 
 
