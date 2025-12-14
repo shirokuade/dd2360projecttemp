@@ -65,7 +65,7 @@ __global__ void create_world(hittable **d_list, hittable **d_world) {
         d_list[i++] = new translate(new rotate_y(new box(vec3(0, 0, 0), vec3(165, 165, 165), white), -18), vec3(130,0,65));
         d_list[i++] = new translate(new rotate_y(new box(vec3(0, 0, 0), vec3(165, 330, 165), white),  15), vec3(265,0,295));
         
-        *d_world = new hitable_list(d_list, i);
+        *d_world = new hittable_list(d_list, i);
     }
 }
 
