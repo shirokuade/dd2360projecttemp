@@ -55,14 +55,7 @@ class interval {
         return interval(min - padding, max + padding);
     }
 
-    static const interval empty, universe;
 };
-
-__device__ __constant__ interval interval_empty_dev   = interval(+infinity, -infinity);
-__device__ __constant__ interval interval_universe_dev = interval(-infinity, +infinity);
-
-//const interval interval::empty    = interval(+infinity, -infinity);
-//const interval interval::universe = interval(-infinity, +infinity);
 
 __device__
 inline interval operator+(const interval& ival, double displacement) {
