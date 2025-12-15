@@ -132,6 +132,9 @@ int main() {
 
     std::cerr << "Rendering a " << nx << "x" << ny << " image with " << ns << " samples.\n";
 
+    // IMPORTANT: Set Heap Size FIRST, before any CUDA allocations or kernel launches
+    checkCudaErrors(cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1024 * 1024 * 256)); // 256MB heap
+
     // Allocate Framebuffer
     int num_pixels = nx * ny;
     size_t fb_size = num_pixels * sizeof(vec3);
@@ -148,9 +151,6 @@ int main() {
     render_init<<<blocks, threads>>>(nx, ny, d_rand_state);
     checkCudaErrors(cudaGetLastError());
     checkCudaErrors(cudaDeviceSynchronize());
-
-    // Set Heap Size large enough
-    checkCudaErrors(cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1024 * 1024 * 100)); // 100MB heap
 
     hittable **d_list;
     checkCudaErrors(cudaMalloc((void **)&d_list, 20 * sizeof(hittable *))); // Array for list items
