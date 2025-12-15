@@ -16,15 +16,26 @@ class aabb {
   public:
     interval x, y, z;
 
-    __device__ aabb() {} // The default AABB is empty, since intervals are empty by default.
+    __host__ __device__ aabb() {} // The default AABB is empty, since intervals are empty by default.
 
-    __device__ aabb(const interval& x, const interval& y, const interval& z)
+    // Explicit copy constructor for CUDA compatibility
+    __host__ __device__ aabb(const aabb& other) : x(other.x), y(other.y), z(other.z) {}
+
+    // Explicit assignment operator for CUDA compatibility
+    __host__ __device__ aabb& operator=(const aabb& other) {
+        x = other.x;
+        y = other.y;
+        z = other.z;
+        return *this;
+    }
+
+    __host__ __device__ aabb(const interval& x, const interval& y, const interval& z)
       : x(x), y(y), z(z)
     {
         pad_to_minimums();
     }
 
-    __device__ aabb(const point3& a, const point3& b) {
+    __host__ __device__ aabb(const point3& a, const point3& b) {
         // Treat the two points a and b as extrema for the bounding box, so we don't require a
         // particular minimum/maximum coordinate order.
 
@@ -35,19 +46,19 @@ class aabb {
         pad_to_minimums();
     }
 
-    __device__ aabb(const aabb& box0, const aabb& box1) {
+    __host__ __device__ aabb(const aabb& box0, const aabb& box1) {
         x = interval(box0.x, box1.x);
         y = interval(box0.y, box1.y);
         z = interval(box0.z, box1.z);
     }
 
-    __device__ const interval& axis_interval(int n) const {
+    __host__ __device__ const interval& axis_interval(int n) const {
         if (n == 1) return y;
         if (n == 2) return z;
         return x;
     }
 
-    __device__ bool hit(const ray& r, interval ray_t) const {
+    __host__ __device__ bool hit(const ray& r, interval ray_t) const {
         const point3& ray_orig = r.origin();
         const vec3&   ray_dir  = r.direction();
 
@@ -72,7 +83,7 @@ class aabb {
         return true;
     }
 
-    __device__ int longest_axis() const {
+    __host__ __device__ int longest_axis() const {
         // Returns the index of the longest axis of the bounding box.
 
         if (x.size() > y.size())
@@ -81,11 +92,9 @@ class aabb {
             return y.size() > z.size() ? 1 : 2;
     }
 
-    // static const aabb empty, universe;
-
   private:
 
-    __device__ void pad_to_minimums() {
+    __host__ __device__ void pad_to_minimums() {
         // Adjust the AABB so that no side is narrower than some delta, padding if necessary.
 
         double delta = 0.0001;
@@ -95,15 +104,11 @@ class aabb {
     }
 };
 
-// I don't think these ae used actually
-//const aabb aabb::empty    = aabb(interval::empty,    interval::empty,    interval::empty);
-//const aabb aabb::universe = aabb(interval::universe, interval::universe, interval::universe);
-
-__device__ aabb operator+(const aabb& bbox, const vec3& offset) {
+__host__ __device__ inline aabb operator+(const aabb& bbox, const vec3& offset) {
     return aabb(bbox.x + offset.x(), bbox.y + offset.y(), bbox.z + offset.z());
 }
 
-__device__ aabb operator+(const vec3& offset, const aabb& bbox) {
+__host__ __device__ inline aabb operator+(const vec3& offset, const aabb& bbox) {
     return bbox + offset;
 }
 
