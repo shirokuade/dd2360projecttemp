@@ -20,6 +20,17 @@ class vec3 {
     __host__ __device__ vec3() : e{0,0,0} {}
     __host__ __device__ vec3(double e0, double e1, double e2) : e{e0, e1, e2} {}
 
+    // Explicit copy constructor for CUDA compatibility
+    __host__ __device__ vec3(const vec3& other) : e{other.e[0], other.e[1], other.e[2]} {}
+
+    // Explicit assignment operator for CUDA compatibility
+    __host__ __device__ vec3& operator=(const vec3& other) {
+        e[0] = other.e[0];
+        e[1] = other.e[1];
+        e[2] = other.e[2];
+        return *this;
+    }
+
     __host__ __device__ double x() const { return e[0]; }
     __host__ __device__ double y() const { return e[1]; }
     __host__ __device__ double z() const { return e[2]; }

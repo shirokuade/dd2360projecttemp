@@ -24,6 +24,34 @@ struct CameraData {
     float lens_radius;
     int image_width;
     int image_height;
+
+    __host__ __device__ CameraData() : time0(0), time1(0), lens_radius(0), image_width(0), image_height(0) {}
+
+    // Explicit copy constructor for CUDA compatibility
+    __host__ __device__ CameraData(const CameraData& other)
+        : origin(other.origin), lower_left_corner(other.lower_left_corner),
+          horizontal(other.horizontal), vertical(other.vertical),
+          u(other.u), v(other.v), w(other.w),
+          time0(other.time0), time1(other.time1),
+          lens_radius(other.lens_radius),
+          image_width(other.image_width), image_height(other.image_height) {}
+
+    // Explicit assignment operator for CUDA compatibility
+    __host__ __device__ CameraData& operator=(const CameraData& other) {
+        origin = other.origin;
+        lower_left_corner = other.lower_left_corner;
+        horizontal = other.horizontal;
+        vertical = other.vertical;
+        u = other.u;
+        v = other.v;
+        w = other.w;
+        time0 = other.time0;
+        time1 = other.time1;
+        lens_radius = other.lens_radius;
+        image_width = other.image_width;
+        image_height = other.image_height;
+        return *this;
+    }
 };
 
 class camera_host {

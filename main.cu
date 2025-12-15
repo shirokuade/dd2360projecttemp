@@ -132,8 +132,9 @@ int main() {
 
     std::cerr << "Rendering a " << nx << "x" << ny << " image with " << ns << " samples.\n";
 
-    // IMPORTANT: Set Heap Size FIRST, before any CUDA allocations or kernel launches
+    // IMPORTANT: Set limits FIRST, before any CUDA allocations or kernel launches
     checkCudaErrors(cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1024 * 1024 * 256)); // 256MB heap
+    checkCudaErrors(cudaDeviceSetLimit(cudaLimitStackSize, 16384)); // 16KB stack per thread for deep call chains
 
     // Allocate Framebuffer
     int num_pixels = nx * ny;

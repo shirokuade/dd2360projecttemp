@@ -15,13 +15,25 @@
 
 class ray {
   public:
-    __host__ __device__ ray() {}
+    __host__ __device__ ray() : tm(0) {}
 
     __host__ __device__ ray(const point3& origin, const vec3& direction, double time)
       : orig(origin), dir(direction), tm(time) {}
 
     __host__ __device__ ray(const point3& origin, const vec3& direction)
       : ray(origin, direction, 0) {}
+
+    // Explicit copy constructor for CUDA compatibility
+    __host__ __device__ ray(const ray& other)
+      : orig(other.orig), dir(other.dir), tm(other.tm) {}
+
+    // Explicit assignment operator for CUDA compatibility
+    __host__ __device__ ray& operator=(const ray& other) {
+        orig = other.orig;
+        dir = other.dir;
+        tm = other.tm;
+        return *this;
+    }
 
     __host__ __device__ const point3& origin() const  { return orig; }
     __host__ __device__ const vec3& direction() const { return dir; }

@@ -25,6 +25,25 @@ class hit_record {
     double v;
     bool front_face;
 
+    __host__ __device__ hit_record() : mat_ptr(nullptr), t(0), u(0), v(0), front_face(false) {}
+
+    // Explicit copy constructor for CUDA compatibility
+    __host__ __device__ hit_record(const hit_record& other)
+        : p(other.p), normal(other.normal), mat_ptr(other.mat_ptr),
+          t(other.t), u(other.u), v(other.v), front_face(other.front_face) {}
+
+    // Explicit assignment operator for CUDA compatibility
+    __host__ __device__ hit_record& operator=(const hit_record& other) {
+        p = other.p;
+        normal = other.normal;
+        mat_ptr = other.mat_ptr;
+        t = other.t;
+        u = other.u;
+        v = other.v;
+        front_face = other.front_face;
+        return *this;
+    }
+
     __host__ __device__ void set_face_normal(const ray& r, const vec3& outward_normal) {
         // Sets the hit record normal vector.
         // NOTE: the parameter `outward_normal` is assumed to have unit length.
