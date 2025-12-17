@@ -54,8 +54,55 @@ void check_cuda(cudaError_t result, char const *const func, const char *const fi
     }
 }
 
-// Constant memory for camera data (64KB limit, CameraData is small)
-__constant__ CameraData d_camera;
+// POD struct for constant memory (no constructors allowed in __constant__)
+struct CameraDataPOD {
+    double origin[3];
+    double lower_left_corner[3];
+    double horizontal[3];
+    double vertical[3];
+    double u[3], v[3], w[3];
+    float time0, time1;
+    float lens_radius;
+    int image_width;
+    int image_height;
+};
+
+// Constant memory for camera data (64KB limit, CameraDataPOD is small)
+__constant__ CameraDataPOD d_camera_pod;
+
+// Helper to copy CameraData to POD struct
+void copyToPOD(CameraDataPOD& pod, const CameraData& cam) {
+    pod.origin[0] = cam.origin.x(); pod.origin[1] = cam.origin.y(); pod.origin[2] = cam.origin.z();
+    pod.lower_left_corner[0] = cam.lower_left_corner.x(); pod.lower_left_corner[1] = cam.lower_left_corner.y(); pod.lower_left_corner[2] = cam.lower_left_corner.z();
+    pod.horizontal[0] = cam.horizontal.x(); pod.horizontal[1] = cam.horizontal.y(); pod.horizontal[2] = cam.horizontal.z();
+    pod.vertical[0] = cam.vertical.x(); pod.vertical[1] = cam.vertical.y(); pod.vertical[2] = cam.vertical.z();
+    pod.u[0] = cam.u.x(); pod.u[1] = cam.u.y(); pod.u[2] = cam.u.z();
+    pod.v[0] = cam.v.x(); pod.v[1] = cam.v.y(); pod.v[2] = cam.v.z();
+    pod.w[0] = cam.w.x(); pod.w[1] = cam.w.y(); pod.w[2] = cam.w.z();
+    pod.time0 = cam.time0;
+    pod.time1 = cam.time1;
+    pod.lens_radius = cam.lens_radius;
+    pod.image_width = cam.image_width;
+    pod.image_height = cam.image_height;
+}
+
+// Device function to get ray from POD camera data
+__device__ ray get_ray_from_pod(const CameraDataPOD& cam, float s, float t, curandState *local_rand_state) {
+    vec3 origin(cam.origin[0], cam.origin[1], cam.origin[2]);
+    vec3 lower_left(cam.lower_left_corner[0], cam.lower_left_corner[1], cam.lower_left_corner[2]);
+    vec3 horizontal(cam.horizontal[0], cam.horizontal[1], cam.horizontal[2]);
+    vec3 vertical(cam.vertical[0], cam.vertical[1], cam.vertical[2]);
+    vec3 u(cam.u[0], cam.u[1], cam.u[2]);
+    vec3 v(cam.v[0], cam.v[1], cam.v[2]);
+
+    vec3 rd = cam.lens_radius * random_in_unit_disk(local_rand_state);
+    vec3 offset = u * rd.x() + v * rd.y();
+    float time = cam.time0 + curand_uniform(local_rand_state) * (cam.time1 - cam.time0);
+
+    return ray(origin + offset,
+               lower_left + s * horizontal + t * vertical - origin - offset,
+               time);
+}
 
 // Initialize rendering - optimized with better thread utilization
 __global__ void render_init(int max_x, int max_y, curandState *rand_state, int y_offset) {
@@ -132,16 +179,12 @@ __global__ void render(vec3 *fb, int max_x, int max_y, int ns, hittable **world,
     curandState local_rand_state = rand_state[pixel_index];
     vec3 col(0,0,0);
 
-    // Use constant memory camera
-    #if USE_CONSTANT_MEMORY
-    CameraData cam = d_camera;
-    #endif
-
     for(int s=0; s < ns; s++) {
         float u = float(i + curand_uniform(&local_rand_state)) / float(max_x);
         float v = float(j + curand_uniform(&local_rand_state)) / float(max_y);
 
-        ray r = get_ray(cam, u, v, &local_rand_state);
+        // Use constant memory camera (POD version)
+        ray r = get_ray_from_pod(d_camera_pod, u, v, &local_rand_state);
         col += ray_color(r, world, &local_rand_state);
     }
 
@@ -191,14 +234,11 @@ __global__ void render_sample(vec3 *accum_fb, int max_x, int max_y, hittable **w
     int pixel_index = j * max_x + i;
     curandState local_rand_state = rand_state[pixel_index];
 
-    // Use constant memory camera
-    CameraData cam = d_camera;
-
-    // Generate one sample
+    // Generate one sample using constant memory camera (POD version)
     float u = float(i + curand_uniform(&local_rand_state)) / float(max_x);
     float v = float(j + curand_uniform(&local_rand_state)) / float(max_y);
 
-    ray r = get_ray(cam, u, v, &local_rand_state);
+    ray r = get_ray_from_pod(d_camera_pod, u, v, &local_rand_state);
     vec3 col = ray_color(r, world, &local_rand_state);
 
     // Accumulate (no averaging yet - that happens when saving frame)
@@ -313,9 +353,11 @@ int main() {
 
     camera_host cam_host(lookfrom, lookat, vec3(0,1,0), vfov, float(nx)/float(ny), aperture, dist_to_focus, 0.0, 1.0, nx, ny);
 
-    // Copy camera data to constant memory
+    // Copy camera data to constant memory (using POD struct)
     #if USE_CONSTANT_MEMORY
-    checkCudaErrors(cudaMemcpyToSymbol(d_camera, &cam_host.data, sizeof(CameraData)));
+    CameraDataPOD cam_pod;
+    copyToPOD(cam_pod, cam_host.data);
+    checkCudaErrors(cudaMemcpyToSymbol(d_camera_pod, &cam_pod, sizeof(CameraDataPOD)));
     #endif
 
     auto start_time = std::chrono::high_resolution_clock::now();
