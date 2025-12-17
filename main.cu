@@ -9,6 +9,13 @@
 // along with this software. If not, see <http://creativecommons.org/publicdomain/zero/1.0/>.
 //==============================================================================================
 
+//==============================================================================
+// CONFIGURATION
+//==============================================================================
+#define PROGRESSIVE_RENDER false  // Set to true to enable progress frames (slower)
+                                  // Set to false for maximum performance (no preview)
+//==============================================================================
+
 #include "rtweekend.h"
 #include "camera.h"
 #include "hittable.h"
@@ -102,7 +109,34 @@ __device__ vec3 ray_color(const ray& r, hittable **world, curandState *local_ran
     return cur_emitted; // Exceeded max depth
 }
 
-// Progressive render kernel - renders a single sample and accumulates
+// Fast render kernel - all samples in one kernel (maximum performance)
+__global__ void render(vec3 *fb, int max_x, int max_y, int ns, CameraData cam, hittable **world, curandState *rand_state) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    int j = threadIdx.y + blockIdx.y * blockDim.y;
+
+    if((i >= max_x) || (j >= max_y)) return;
+
+    int pixel_index = j * max_x + i;
+    curandState local_rand_state = rand_state[pixel_index];
+    vec3 col(0,0,0);
+
+    for(int s=0; s < ns; s++) {
+        float u = float(i + curand_uniform(&local_rand_state)) / float(max_x);
+        float v = float(j + curand_uniform(&local_rand_state)) / float(max_y);
+
+        ray r = get_ray(cam, u, v, &local_rand_state);
+        col += ray_color(r, world, &local_rand_state);
+    }
+
+    rand_state[pixel_index] = local_rand_state;
+
+    col /= float(ns);
+    // Gamma correction
+    col = vec3(sqrt(col[0]), sqrt(col[1]), sqrt(col[2]));
+    fb[pixel_index] = col;
+}
+
+// Progressive render kernel - renders a single sample and accumulates (for progress visualization)
 __global__ void render_sample(vec3 *accum_fb, int max_x, int max_y, CameraData cam, hittable **world, curandState *rand_state) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     int j = threadIdx.y + blockIdx.y * blockDim.y;
@@ -153,26 +187,23 @@ int main() {
     int tx = 8;
     int ty = 8;
 
-    // Create frames directory
-    mkdir("frames", 0777);
-
     std::cerr << "Rendering a " << nx << "x" << ny << " image with " << ns << " samples.\n";
-    std::cerr << "Progress frames will be saved to 'frames/' directory.\n";
+    std::cerr << "Progressive rendering: " << (PROGRESSIVE_RENDER ? "ENABLED (slower)" : "DISABLED (fast)") << "\n";
 
     // IMPORTANT: Set limits FIRST, before any CUDA allocations or kernel launches
     checkCudaErrors(cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1024 * 1024 * 256)); // 256MB heap
     checkCudaErrors(cudaDeviceSetLimit(cudaLimitStackSize, 16384)); // 16KB stack per thread for deep call chains
 
-    // Allocate Framebuffers
+    // Allocate Framebuffer
     int num_pixels = nx * ny;
     size_t fb_size = num_pixels * sizeof(vec3);
 
-    vec3 *accum_fb;  // Accumulation buffer (sum of all samples)
-    checkCudaErrors(cudaMallocManaged((void **)&accum_fb, fb_size));
+    vec3 *fb;
+    checkCudaErrors(cudaMallocManaged((void **)&fb, fb_size));
 
-    // Initialize accumulation buffer to zero
+    // Initialize framebuffer to zero
     for (int i = 0; i < num_pixels; i++) {
-        accum_fb[i] = vec3(0, 0, 0);
+        fb[i] = vec3(0, 0, 0);
     }
 
     // Allocate Random State
@@ -204,73 +235,99 @@ int main() {
 
     camera_host cam_host(lookfrom, lookat, vec3(0,1,0), vfov, float(nx)/float(ny), aperture, dist_to_focus, 0.0, 1.0, nx, ny);
 
-    // Progressive rendering with time-based frame capture
     auto start_time = std::chrono::high_resolution_clock::now();
-    auto last_frame_time = start_time;
-    int frame_count = 0;
-    std::vector<double> frame_timestamps;  // Store timestamps for each frame
 
-    std::cerr << "Starting progressive render...\n";
+    if (PROGRESSIVE_RENDER) {
+        // Progressive rendering with time-based frame capture
+        mkdir("frames", 0777);
+        std::cerr << "Progress frames will be saved to 'frames/' directory.\n";
 
-    for (int sample = 1; sample <= ns; sample++) {
-        // Render one sample
-        render_sample<<<blocks, threads>>>(accum_fb, nx, ny, cam_host.data, d_world, d_rand_state);
+        auto last_frame_time = start_time;
+        int frame_count = 0;
+
+        std::cerr << "Starting progressive render...\n";
+
+        for (int sample = 1; sample <= ns; sample++) {
+            // Render one sample
+            render_sample<<<blocks, threads>>>(fb, nx, ny, cam_host.data, d_world, d_rand_state);
+            checkCudaErrors(cudaGetLastError());
+            checkCudaErrors(cudaDeviceSynchronize());
+
+            auto current_time = std::chrono::high_resolution_clock::now();
+            double elapsed_since_last_frame = std::chrono::duration<double>(current_time - last_frame_time).count();
+            double total_elapsed = std::chrono::duration<double>(current_time - start_time).count();
+
+            // Save a frame every ~1 second OR on the last sample
+            if (elapsed_since_last_frame >= 1.0 || sample == ns) {
+                std::ostringstream filename;
+                filename << "frames/frame_" << std::setfill('0') << std::setw(5) << frame_count << ".ppm";
+
+                save_frame_ppm(filename.str(), fb, nx, ny, sample);
+
+                std::cerr << "\rSample " << sample << "/" << ns
+                          << " | Frame " << frame_count
+                          << " | Time: " << std::fixed << std::setprecision(1) << total_elapsed << "s"
+                          << std::flush;
+
+                frame_count++;
+                last_frame_time = current_time;
+            }
+        }
+
+        auto end_time = std::chrono::high_resolution_clock::now();
+        double total_time = std::chrono::duration<double>(end_time - start_time).count();
+
+        std::cerr << "\n\nRendering complete!\n";
+        std::cerr << "Total time: " << std::fixed << std::setprecision(2) << total_time << " seconds\n";
+        std::cerr << "Total frames saved: " << frame_count << "\n";
+
+        // Output final image (need to normalize for progressive mode)
+        std::cout << "P3\n" << nx << " " << ny << "\n255\n";
+        for (int j = ny-1; j >= 0; j--) {
+            for (int i = 0; i < nx; i++) {
+                size_t pixel_index = j * nx + i;
+                vec3 col = fb[pixel_index] / float(ns);
+                col = vec3(sqrt(fmax(0.0, col[0])), sqrt(fmax(0.0, col[1])), sqrt(fmax(0.0, col[2])));
+
+                int ir = int(255.99 * fmin(1.0, col.x()));
+                int ig = int(255.99 * fmin(1.0, col.y()));
+                int ib = int(255.99 * fmin(1.0, col.z()));
+                std::cout << ir << " " << ig << " " << ib << "\n";
+            }
+        }
+
+        std::cerr << "\nTo create a GIF showing render progress, run:\n";
+        std::cerr << "  python make_gif.py render_progress 1\n";
+
+    } else {
+        // Fast rendering - single kernel launch
+        std::cerr << "Starting fast render...\n";
+
+        render<<<blocks, threads>>>(fb, nx, ny, ns, cam_host.data, d_world, d_rand_state);
         checkCudaErrors(cudaGetLastError());
         checkCudaErrors(cudaDeviceSynchronize());
 
-        auto current_time = std::chrono::high_resolution_clock::now();
-        double elapsed_since_last_frame = std::chrono::duration<double>(current_time - last_frame_time).count();
-        double total_elapsed = std::chrono::duration<double>(current_time - start_time).count();
+        auto end_time = std::chrono::high_resolution_clock::now();
+        double total_time = std::chrono::duration<double>(end_time - start_time).count();
 
-        // Save a frame every ~1 second OR on the last sample
-        if (elapsed_since_last_frame >= 1.0 || sample == ns) {
-            std::ostringstream filename;
-            filename << "frames/frame_" << std::setfill('0') << std::setw(5) << frame_count << ".ppm";
+        std::cerr << "Rendering complete!\n";
+        std::cerr << "Total time: " << std::fixed << std::setprecision(2) << total_time << " seconds\n";
 
-            save_frame_ppm(filename.str(), accum_fb, nx, ny, sample);
-            frame_timestamps.push_back(total_elapsed);
-
-            std::cerr << "\rSample " << sample << "/" << ns
-                      << " | Frame " << frame_count
-                      << " | Time: " << std::fixed << std::setprecision(1) << total_elapsed << "s"
-                      << std::flush;
-
-            frame_count++;
-            last_frame_time = current_time;
+        // Output final image (already normalized in kernel)
+        std::cout << "P3\n" << nx << " " << ny << "\n255\n";
+        for (int j = ny-1; j >= 0; j--) {
+            for (int i = 0; i < nx; i++) {
+                size_t pixel_index = j * nx + i;
+                int ir = int(255.99 * fb[pixel_index].x());
+                int ig = int(255.99 * fb[pixel_index].y());
+                int ib = int(255.99 * fb[pixel_index].z());
+                std::cout << ir << " " << ig << " " << ib << "\n";
+            }
         }
     }
-
-    auto end_time = std::chrono::high_resolution_clock::now();
-    double total_time = std::chrono::duration<double>(end_time - start_time).count();
-
-    std::cerr << "\n\nRendering complete!\n";
-    std::cerr << "Total time: " << std::fixed << std::setprecision(2) << total_time << " seconds\n";
-    std::cerr << "Total frames saved: " << frame_count << "\n";
-    std::cerr << "Frames saved in: frames/\n\n";
-
-    // Output final image to stdout (PPM format)
-    std::cout << "P3\n" << nx << " " << ny << "\n255\n";
-    for (int j = ny-1; j >= 0; j--) {
-        for (int i = 0; i < nx; i++) {
-            size_t pixel_index = j * nx + i;
-            vec3 col = accum_fb[pixel_index] / float(ns);
-            col = vec3(sqrt(fmax(0.0, col[0])), sqrt(fmax(0.0, col[1])), sqrt(fmax(0.0, col[2])));
-
-            int ir = int(255.99 * fmin(1.0, col.x()));
-            int ig = int(255.99 * fmin(1.0, col.y()));
-            int ib = int(255.99 * fmin(1.0, col.z()));
-            std::cout << ir << " " << ig << " " << ib << "\n";
-        }
-    }
-
-    // Print GIF generation instructions
-    std::cerr << "To create a GIF showing render progress, run:\n";
-    std::cerr << "  convert -delay 100 -loop 0 frames/frame_*.ppm render_progress.gif\n";
-    std::cerr << "\nOr for a video (ffmpeg):\n";
-    std::cerr << "  ffmpeg -framerate 1 -pattern_type glob -i 'frames/frame_*.ppm' -c:v libx264 -pix_fmt yuv420p render_progress.mp4\n";
 
     // Freeing memory
-    checkCudaErrors(cudaFree(accum_fb));
+    checkCudaErrors(cudaFree(fb));
     checkCudaErrors(cudaFree(d_rand_state));
     checkCudaErrors(cudaFree(d_list));
     checkCudaErrors(cudaFree(d_world));
