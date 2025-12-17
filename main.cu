@@ -16,8 +16,8 @@
                                   // Set to false for maximum performance (no preview)
 
 // OPTIMIZATION SETTINGS
-#define BLOCK_SIZE_X 16           // Thread block X dimension (was 8)
-#define BLOCK_SIZE_Y 16           // Thread block Y dimension (was 8)
+#define BLOCK_SIZE_X 32           // Thread block X dimension (32 = 1 warp per row for better coalescing)
+#define BLOCK_SIZE_Y 8            // Thread block Y dimension (32x8 = 256 threads)
 #define NUM_STREAMS 4             // Number of CUDA streams for parallel execution
 #define USE_PINNED_MEMORY true    // Use pinned host memory for faster transfers
 #define USE_CONSTANT_MEMORY true  // Use constant memory for camera data
