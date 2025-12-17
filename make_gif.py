@@ -15,38 +15,57 @@ import sys
 import glob
 
 def ppm_to_array(filename):
-    """Read a PPM file and return as numpy array."""
+    """Read a P3 (ASCII) PPM file and return as numpy array."""
     import numpy as np
 
-    with open(filename, 'rb') as f:
-        # Read header
-        header = f.readline().decode().strip()
-        if header != 'P3' and header != 'P6':
-            # Handle P3 format (ASCII)
-            f.seek(0)
-            lines = f.read().decode().split('\n')
+    with open(filename, 'r') as f:
+        lines = f.readlines()
 
-            # Skip comments and get dimensions
-            idx = 0
-            while lines[idx].startswith('#') or lines[idx].strip() == 'P3':
-                idx += 1
+    # Parse header
+    idx = 0
 
-            dims = lines[idx].split()
-            width, height = int(dims[0]), int(dims[1])
+    # Skip comments, find P3 header
+    while idx < len(lines):
+        line = lines[idx].strip()
+        if line.startswith('#') or line == '':
             idx += 1
-            max_val = int(lines[idx])
+            continue
+        if line == 'P3':
             idx += 1
+            break
+        idx += 1
 
-            # Read pixel data
-            pixels = []
-            for line in lines[idx:]:
-                pixels.extend(line.split())
+    # Skip comments, find dimensions
+    while idx < len(lines):
+        line = lines[idx].strip()
+        if line.startswith('#') or line == '':
+            idx += 1
+            continue
+        dims = line.split()
+        width, height = int(dims[0]), int(dims[1])
+        idx += 1
+        break
 
-            pixels = [int(p) for p in pixels if p]
-            img = np.array(pixels, dtype=np.uint8).reshape((height, width, 3))
-            return img
+    # Skip comments, find max value
+    while idx < len(lines):
+        line = lines[idx].strip()
+        if line.startswith('#') or line == '':
+            idx += 1
+            continue
+        max_val = int(line)
+        idx += 1
+        break
 
-    return None
+    # Read all remaining pixel data
+    pixels = []
+    for line in lines[idx:]:
+        line = line.strip()
+        if line and not line.startswith('#'):
+            pixels.extend(line.split())
+
+    pixels = [int(p) for p in pixels if p]
+    img = np.array(pixels, dtype=np.uint8).reshape((height, width, 3))
+    return img
 
 def main():
     output_name = sys.argv[1] if len(sys.argv) > 1 else "render_progress"
@@ -68,9 +87,15 @@ def main():
         images = []
         for i, f in enumerate(frame_files):
             print(f"\rLoading frame {i+1}/{len(frame_files)}", end="", flush=True)
-            img_array = ppm_to_array(f)
-            if img_array is not None:
+            try:
+                img_array = ppm_to_array(f)
                 images.append(Image.fromarray(img_array))
+            except Exception as e:
+                print(f"\nError loading {f}: {e}")
+
+        if not images:
+            print("\nNo images could be loaded!")
+            return
 
         print(f"\nSaving GIF as {output_name}.gif...")
 
