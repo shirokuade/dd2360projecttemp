@@ -30,6 +30,7 @@
 #include <chrono>
 #include <vector>
 #include <sys/stat.h>
+#include <cstdlib>
 #include <curand_kernel.h>
 #include "vec3.h"
 #include "ray.h"
@@ -239,6 +240,8 @@ int main() {
 
     if (PROGRESSIVE_RENDER) {
         // Progressive rendering with time-based frame capture
+        // Remove old frames directory and create fresh one
+        system("rm -rf frames");
         mkdir("frames", 0777);
         std::cerr << "Progress frames will be saved to 'frames/' directory.\n";
 
