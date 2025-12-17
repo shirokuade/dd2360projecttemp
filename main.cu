@@ -14,6 +14,13 @@
 //==============================================================================
 #define PROGRESSIVE_RENDER false  // Set to true to enable progress frames (slower)
                                   // Set to false for maximum performance (no preview)
+
+// OPTIMIZATION SETTINGS
+#define BLOCK_SIZE_X 16           // Thread block X dimension (was 8)
+#define BLOCK_SIZE_Y 16           // Thread block Y dimension (was 8)
+#define NUM_STREAMS 4             // Number of CUDA streams for parallel execution
+#define USE_PINNED_MEMORY true    // Use pinned host memory for faster transfers
+#define USE_CONSTANT_MEMORY true  // Use constant memory for camera data
 //==============================================================================
 
 #include "rtweekend.h"
@@ -47,15 +54,18 @@ void check_cuda(cudaError_t result, char const *const func, const char *const fi
     }
 }
 
-// Initialize rendering
-__global__ void render_init(int max_x, int max_y, curandState *rand_state) {
+// Constant memory for camera data (64KB limit, CameraData is small)
+__constant__ CameraData d_camera;
+
+// Initialize rendering - optimized with better thread utilization
+__global__ void render_init(int max_x, int max_y, curandState *rand_state, int y_offset) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
-    int j = threadIdx.y + blockIdx.y * blockDim.y;
+    int j = threadIdx.y + blockIdx.y * blockDim.y + y_offset;
     if((i >= max_x) || (j >= max_y)) return;
     int pixel_index = j * max_x + i;
 
-    // Each pixel has its own random seed
-    curand_init(1984, pixel_index, 0, &rand_state[pixel_index]);
+    // Each pixel has its own random seed - use better seed mixing
+    curand_init(1984 + pixel_index, 0, 0, &rand_state[pixel_index]);
 }
 
 
@@ -110,12 +120,46 @@ __device__ vec3 ray_color(const ray& r, hittable **world, curandState *local_ran
     return cur_emitted; // Exceeded max depth
 }
 
-// Fast render kernel - all samples in one kernel (maximum performance)
-__global__ void render(vec3 *fb, int max_x, int max_y, int ns, CameraData cam, hittable **world, curandState *rand_state) {
+// Fast render kernel using constant memory for camera
+__global__ void render(vec3 *fb, int max_x, int max_y, int ns, hittable **world, curandState *rand_state, int y_offset, int y_size) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
-    int j = threadIdx.y + blockIdx.y * blockDim.y;
+    int local_j = threadIdx.y + blockIdx.y * blockDim.y;
+    int j = local_j + y_offset;
 
-    if((i >= max_x) || (j >= max_y)) return;
+    if((i >= max_x) || (local_j >= y_size) || (j >= max_y)) return;
+
+    int pixel_index = j * max_x + i;
+    curandState local_rand_state = rand_state[pixel_index];
+    vec3 col(0,0,0);
+
+    // Use constant memory camera
+    #if USE_CONSTANT_MEMORY
+    CameraData cam = d_camera;
+    #endif
+
+    for(int s=0; s < ns; s++) {
+        float u = float(i + curand_uniform(&local_rand_state)) / float(max_x);
+        float v = float(j + curand_uniform(&local_rand_state)) / float(max_y);
+
+        ray r = get_ray(cam, u, v, &local_rand_state);
+        col += ray_color(r, world, &local_rand_state);
+    }
+
+    rand_state[pixel_index] = local_rand_state;
+
+    col /= float(ns);
+    // Gamma correction
+    col = vec3(sqrt(col[0]), sqrt(col[1]), sqrt(col[2]));
+    fb[pixel_index] = col;
+}
+
+// Render kernel with CameraData passed as parameter (for non-constant memory mode)
+__global__ void render_param(vec3 *fb, int max_x, int max_y, int ns, CameraData cam, hittable **world, curandState *rand_state, int y_offset, int y_size) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    int local_j = threadIdx.y + blockIdx.y * blockDim.y;
+    int j = local_j + y_offset;
+
+    if((i >= max_x) || (local_j >= y_size) || (j >= max_y)) return;
 
     int pixel_index = j * max_x + i;
     curandState local_rand_state = rand_state[pixel_index];
@@ -138,7 +182,7 @@ __global__ void render(vec3 *fb, int max_x, int max_y, int ns, CameraData cam, h
 }
 
 // Progressive render kernel - renders a single sample and accumulates (for progress visualization)
-__global__ void render_sample(vec3 *accum_fb, int max_x, int max_y, CameraData cam, hittable **world, curandState *rand_state) {
+__global__ void render_sample(vec3 *accum_fb, int max_x, int max_y, hittable **world, curandState *rand_state) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     int j = threadIdx.y + blockIdx.y * blockDim.y;
 
@@ -146,6 +190,9 @@ __global__ void render_sample(vec3 *accum_fb, int max_x, int max_y, CameraData c
 
     int pixel_index = j * max_x + i;
     curandState local_rand_state = rand_state[pixel_index];
+
+    // Use constant memory camera
+    CameraData cam = d_camera;
 
     // Generate one sample
     float u = float(i + curand_uniform(&local_rand_state)) / float(max_x);
@@ -185,11 +232,15 @@ int main() {
     int nx = 600; // Resolution
     int ny = 600;
     int ns = 100; // Total samples per pixel
-    int tx = 8;
-    int ty = 8;
+    int tx = BLOCK_SIZE_X;
+    int ty = BLOCK_SIZE_Y;
 
     std::cerr << "Rendering a " << nx << "x" << ny << " image with " << ns << " samples.\n";
     std::cerr << "Progressive rendering: " << (PROGRESSIVE_RENDER ? "ENABLED (slower)" : "DISABLED (fast)") << "\n";
+    std::cerr << "Block size: " << tx << "x" << ty << " = " << (tx*ty) << " threads/block\n";
+    std::cerr << "Streams: " << NUM_STREAMS << "\n";
+    std::cerr << "Pinned memory: " << (USE_PINNED_MEMORY ? "YES" : "NO") << "\n";
+    std::cerr << "Constant memory: " << (USE_CONSTANT_MEMORY ? "YES" : "NO") << "\n";
 
     // IMPORTANT: Set limits FIRST, before any CUDA allocations or kernel launches
     checkCudaErrors(cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1024 * 1024 * 256)); // 256MB heap
@@ -199,24 +250,50 @@ int main() {
     int num_pixels = nx * ny;
     size_t fb_size = num_pixels * sizeof(vec3);
 
-    vec3 *fb;
-    checkCudaErrors(cudaMallocManaged((void **)&fb, fb_size));
+    vec3 *d_fb;        // Device framebuffer
+    vec3 *h_fb;        // Host framebuffer
 
-    // Initialize framebuffer to zero
-    for (int i = 0; i < num_pixels; i++) {
-        fb[i] = vec3(0, 0, 0);
-    }
+    // Allocate device memory
+    checkCudaErrors(cudaMalloc((void **)&d_fb, fb_size));
+
+    // Allocate host memory (pinned for faster transfers)
+    #if USE_PINNED_MEMORY
+    checkCudaErrors(cudaHostAlloc((void **)&h_fb, fb_size, cudaHostAllocDefault));
+    #else
+    h_fb = new vec3[num_pixels];
+    #endif
+
+    // Initialize device framebuffer to zero
+    checkCudaErrors(cudaMemset(d_fb, 0, fb_size));
 
     // Allocate Random State
     curandState *d_rand_state;
     checkCudaErrors(cudaMalloc((void **)&d_rand_state, num_pixels * sizeof(curandState)));
 
-    // Init Random State
-    dim3 blocks(nx/tx + 1, ny/ty + 1);
+    // Create CUDA streams
+    cudaStream_t streams[NUM_STREAMS];
+    for (int s = 0; s < NUM_STREAMS; s++) {
+        checkCudaErrors(cudaStreamCreate(&streams[s]));
+    }
+
+    // Init Random State (can be done in parallel with streams)
     dim3 threads(tx, ty);
-    render_init<<<blocks, threads>>>(nx, ny, d_rand_state);
+    int rows_per_stream = (ny + NUM_STREAMS - 1) / NUM_STREAMS;
+
+    for (int s = 0; s < NUM_STREAMS; s++) {
+        int y_offset = s * rows_per_stream;
+        int y_size = min(rows_per_stream, ny - y_offset);
+        if (y_size <= 0) continue;
+
+        dim3 blocks((nx + tx - 1) / tx, (y_size + ty - 1) / ty);
+        render_init<<<blocks, threads, 0, streams[s]>>>(nx, ny, d_rand_state, y_offset);
+    }
+
+    // Synchronize all streams
+    for (int s = 0; s < NUM_STREAMS; s++) {
+        checkCudaErrors(cudaStreamSynchronize(streams[s]));
+    }
     checkCudaErrors(cudaGetLastError());
-    checkCudaErrors(cudaDeviceSynchronize());
 
     hittable **d_list;
     checkCudaErrors(cudaMalloc((void **)&d_list, 20 * sizeof(hittable *))); // Array for list items
@@ -236,6 +313,11 @@ int main() {
 
     camera_host cam_host(lookfrom, lookat, vec3(0,1,0), vfov, float(nx)/float(ny), aperture, dist_to_focus, 0.0, 1.0, nx, ny);
 
+    // Copy camera data to constant memory
+    #if USE_CONSTANT_MEMORY
+    checkCudaErrors(cudaMemcpyToSymbol(d_camera, &cam_host.data, sizeof(CameraData)));
+    #endif
+
     auto start_time = std::chrono::high_resolution_clock::now();
 
     if (PROGRESSIVE_RENDER) {
@@ -250,9 +332,11 @@ int main() {
 
         std::cerr << "Starting progressive render...\n";
 
+        dim3 blocks((nx + tx - 1) / tx, (ny + ty - 1) / ty);
+
         for (int sample = 1; sample <= ns; sample++) {
             // Render one sample
-            render_sample<<<blocks, threads>>>(fb, nx, ny, cam_host.data, d_world, d_rand_state);
+            render_sample<<<blocks, threads>>>(d_fb, nx, ny, d_world, d_rand_state);
             checkCudaErrors(cudaGetLastError());
             checkCudaErrors(cudaDeviceSynchronize());
 
@@ -262,10 +346,13 @@ int main() {
 
             // Save a frame every ~1 second OR on the last sample
             if (elapsed_since_last_frame >= 1.0 || sample == ns) {
+                // Copy framebuffer to host
+                checkCudaErrors(cudaMemcpy(h_fb, d_fb, fb_size, cudaMemcpyDeviceToHost));
+
                 std::ostringstream filename;
                 filename << "frames/frame_" << std::setfill('0') << std::setw(5) << frame_count << ".ppm";
 
-                save_frame_ppm(filename.str(), fb, nx, ny, sample);
+                save_frame_ppm(filename.str(), h_fb, nx, ny, sample);
 
                 std::cerr << "\rSample " << sample << "/" << ns
                           << " | Frame " << frame_count
@@ -284,12 +371,15 @@ int main() {
         std::cerr << "Total time: " << std::fixed << std::setprecision(2) << total_time << " seconds\n";
         std::cerr << "Total frames saved: " << frame_count << "\n";
 
+        // Copy final framebuffer
+        checkCudaErrors(cudaMemcpy(h_fb, d_fb, fb_size, cudaMemcpyDeviceToHost));
+
         // Output final image (need to normalize for progressive mode)
         std::cout << "P3\n" << nx << " " << ny << "\n255\n";
         for (int j = ny-1; j >= 0; j--) {
             for (int i = 0; i < nx; i++) {
                 size_t pixel_index = j * nx + i;
-                vec3 col = fb[pixel_index] / float(ns);
+                vec3 col = h_fb[pixel_index] / float(ns);
                 col = vec3(sqrt(fmax(0.0, col[0])), sqrt(fmax(0.0, col[1])), sqrt(fmax(0.0, col[2])));
 
                 int ir = int(255.99 * fmin(1.0, col.x()));
@@ -303,12 +393,28 @@ int main() {
         std::cerr << "  python make_gif.py render_progress 1\n";
 
     } else {
-        // Fast rendering - single kernel launch
-        std::cerr << "Starting fast render...\n";
+        // Fast rendering with streams - divide image into horizontal strips
+        std::cerr << "Starting fast render with " << NUM_STREAMS << " streams...\n";
 
-        render<<<blocks, threads>>>(fb, nx, ny, ns, cam_host.data, d_world, d_rand_state);
+        for (int s = 0; s < NUM_STREAMS; s++) {
+            int y_offset = s * rows_per_stream;
+            int y_size = min(rows_per_stream, ny - y_offset);
+            if (y_size <= 0) continue;
+
+            dim3 blocks((nx + tx - 1) / tx, (y_size + ty - 1) / ty);
+
+            #if USE_CONSTANT_MEMORY
+            render<<<blocks, threads, 0, streams[s]>>>(d_fb, nx, ny, ns, d_world, d_rand_state, y_offset, y_size);
+            #else
+            render_param<<<blocks, threads, 0, streams[s]>>>(d_fb, nx, ny, ns, cam_host.data, d_world, d_rand_state, y_offset, y_size);
+            #endif
+        }
+
+        // Synchronize all streams
+        for (int s = 0; s < NUM_STREAMS; s++) {
+            checkCudaErrors(cudaStreamSynchronize(streams[s]));
+        }
         checkCudaErrors(cudaGetLastError());
-        checkCudaErrors(cudaDeviceSynchronize());
 
         auto end_time = std::chrono::high_resolution_clock::now();
         double total_time = std::chrono::duration<double>(end_time - start_time).count();
@@ -316,21 +422,39 @@ int main() {
         std::cerr << "Rendering complete!\n";
         std::cerr << "Total time: " << std::fixed << std::setprecision(2) << total_time << " seconds\n";
 
+        // Copy framebuffer to host (async with pinned memory)
+        #if USE_PINNED_MEMORY
+        checkCudaErrors(cudaMemcpyAsync(h_fb, d_fb, fb_size, cudaMemcpyDeviceToHost, streams[0]));
+        checkCudaErrors(cudaStreamSynchronize(streams[0]));
+        #else
+        checkCudaErrors(cudaMemcpy(h_fb, d_fb, fb_size, cudaMemcpyDeviceToHost));
+        #endif
+
         // Output final image (already normalized in kernel)
         std::cout << "P3\n" << nx << " " << ny << "\n255\n";
         for (int j = ny-1; j >= 0; j--) {
             for (int i = 0; i < nx; i++) {
                 size_t pixel_index = j * nx + i;
-                int ir = int(255.99 * fb[pixel_index].x());
-                int ig = int(255.99 * fb[pixel_index].y());
-                int ib = int(255.99 * fb[pixel_index].z());
+                int ir = int(255.99 * h_fb[pixel_index].x());
+                int ig = int(255.99 * h_fb[pixel_index].y());
+                int ib = int(255.99 * h_fb[pixel_index].z());
                 std::cout << ir << " " << ig << " " << ib << "\n";
             }
         }
     }
 
+    // Destroy streams
+    for (int s = 0; s < NUM_STREAMS; s++) {
+        checkCudaErrors(cudaStreamDestroy(streams[s]));
+    }
+
     // Freeing memory
-    checkCudaErrors(cudaFree(fb));
+    checkCudaErrors(cudaFree(d_fb));
+    #if USE_PINNED_MEMORY
+    checkCudaErrors(cudaFreeHost(h_fb));
+    #else
+    delete[] h_fb;
+    #endif
     checkCudaErrors(cudaFree(d_rand_state));
     checkCudaErrors(cudaFree(d_list));
     checkCudaErrors(cudaFree(d_world));
