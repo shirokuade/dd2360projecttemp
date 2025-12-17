@@ -17,6 +17,12 @@
 #include "quad.h"
 #include "texture.h"
 #include <iostream>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+#include <chrono>
+#include <vector>
+#include <sys/stat.h>
 #include <curand_kernel.h>
 #include "vec3.h"
 #include "ray.h"
@@ -34,7 +40,6 @@ void check_cuda(cudaError_t result, char const *const func, const char *const fi
 }
 
 // Initialize rendering
-
 __global__ void render_init(int max_x, int max_y, curandState *rand_state) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     int j = threadIdx.y + blockIdx.y * blockDim.y;
@@ -61,10 +66,10 @@ __global__ void create_world(hittable **d_list, hittable **d_world) {
         d_list[i++] = new flip_normals(new xz_rect(0, 555, 0, 555, 555, white));
         d_list[i++] = new xz_rect(0, 555, 0, 555, 0, white);
         d_list[i++] = new flip_normals(new xy_rect(0, 555, 0, 555, 555, white));
-        
+
         d_list[i++] = new translate(new rotate_y(new box(vec3(0, 0, 0), vec3(165, 165, 165), white), -18), vec3(130,0,65));
         d_list[i++] = new translate(new rotate_y(new box(vec3(0, 0, 0), vec3(165, 330, 165), white),  15), vec3(265,0,295));
-        
+
         *d_world = new hittable_list(d_list, i);
     }
 }
@@ -81,7 +86,7 @@ __device__ vec3 ray_color(const ray& r, hittable **world, curandState *local_ran
         if ((*world)->hit(cur_ray, interval(0.001, 1e30), rec)) {
             vec3 emitted = rec.mat_ptr->emitted(rec.u, rec.v, rec.p);
             cur_emitted += cur_attenuation * emitted; // Accumulate emission
-            
+
             vec3 attenuation;
             ray scattered;
             if (rec.mat_ptr->scatter(cur_ray, rec, attenuation, scattered, local_rand_state)) {
@@ -97,7 +102,8 @@ __device__ vec3 ray_color(const ray& r, hittable **world, curandState *local_ran
     return cur_emitted; // Exceeded max depth
 }
 
-__global__ void render(vec3 *fb, int max_x, int max_y, int ns, CameraData cam, hittable **world, curandState *rand_state) {
+// Progressive render kernel - renders a single sample and accumulates
+__global__ void render_sample(vec3 *accum_fb, int max_x, int max_y, CameraData cam, hittable **world, curandState *rand_state) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     int j = threadIdx.y + blockIdx.y * blockDim.y;
 
@@ -105,42 +111,69 @@ __global__ void render(vec3 *fb, int max_x, int max_y, int ns, CameraData cam, h
 
     int pixel_index = j * max_x + i;
     curandState local_rand_state = rand_state[pixel_index];
-    vec3 col(0,0,0);
 
-    for(int s=0; s < ns; s++) {
-        float u = float(i + curand_uniform(&local_rand_state)) / float(max_x);
-        float v = float(j + curand_uniform(&local_rand_state)) / float(max_y);
-        
-        ray r = get_ray(cam, u, v, &local_rand_state);
-        col += ray_color(r, world, &local_rand_state);
-    }
+    // Generate one sample
+    float u = float(i + curand_uniform(&local_rand_state)) / float(max_x);
+    float v = float(j + curand_uniform(&local_rand_state)) / float(max_y);
+
+    ray r = get_ray(cam, u, v, &local_rand_state);
+    vec3 col = ray_color(r, world, &local_rand_state);
+
+    // Accumulate (no averaging yet - that happens when saving frame)
+    accum_fb[pixel_index] += col;
 
     rand_state[pixel_index] = local_rand_state;
+}
 
-    col /= float(ns);
-    // Gamma correction
-    col = vec3(sqrt(col[0]), sqrt(col[1]), sqrt(col[2]));
-    fb[pixel_index] = col;
+// Save a frame as PPM file
+void save_frame_ppm(const std::string& filename, vec3* fb, int nx, int ny, int num_samples) {
+    std::ofstream file(filename);
+    file << "P3\n" << nx << " " << ny << "\n255\n";
+
+    for (int j = ny-1; j >= 0; j--) {
+        for (int i = 0; i < nx; i++) {
+            size_t pixel_index = j * nx + i;
+            // Average by number of samples and apply gamma correction
+            vec3 col = fb[pixel_index] / float(num_samples);
+            col = vec3(sqrt(fmax(0.0, col[0])), sqrt(fmax(0.0, col[1])), sqrt(fmax(0.0, col[2])));
+
+            int ir = int(255.99 * fmin(1.0, col.x()));
+            int ig = int(255.99 * fmin(1.0, col.y()));
+            int ib = int(255.99 * fmin(1.0, col.z()));
+            file << ir << " " << ig << " " << ib << "\n";
+        }
+    }
+    file.close();
 }
 
 int main() {
-    int nx = 600; // Increased resolution
+    int nx = 600; // Resolution
     int ny = 600;
-    int ns = 100; // Samples per pixel
+    int ns = 100; // Total samples per pixel
     int tx = 8;
     int ty = 8;
 
+    // Create frames directory
+    mkdir("frames", 0777);
+
     std::cerr << "Rendering a " << nx << "x" << ny << " image with " << ns << " samples.\n";
+    std::cerr << "Progress frames will be saved to 'frames/' directory.\n";
 
     // IMPORTANT: Set limits FIRST, before any CUDA allocations or kernel launches
     checkCudaErrors(cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1024 * 1024 * 256)); // 256MB heap
     checkCudaErrors(cudaDeviceSetLimit(cudaLimitStackSize, 16384)); // 16KB stack per thread for deep call chains
 
-    // Allocate Framebuffer
+    // Allocate Framebuffers
     int num_pixels = nx * ny;
     size_t fb_size = num_pixels * sizeof(vec3);
-    vec3 *fb;
-    checkCudaErrors(cudaMallocManaged((void **)&fb, fb_size));
+
+    vec3 *accum_fb;  // Accumulation buffer (sum of all samples)
+    checkCudaErrors(cudaMallocManaged((void **)&accum_fb, fb_size));
+
+    // Initialize accumulation buffer to zero
+    for (int i = 0; i < num_pixels; i++) {
+        accum_fb[i] = vec3(0, 0, 0);
+    }
 
     // Allocate Random State
     curandState *d_rand_state;
@@ -168,29 +201,76 @@ int main() {
     float dist_to_focus = 10.0;
     float aperture = 0.0;
     float vfov = 40.0;
-    
+
     camera_host cam_host(lookfrom, lookat, vec3(0,1,0), vfov, float(nx)/float(ny), aperture, dist_to_focus, 0.0, 1.0, nx, ny);
 
-    // Render
-    render<<<blocks, threads>>>(fb, nx, ny, ns, cam_host.data, d_world, d_rand_state);
-    checkCudaErrors(cudaGetLastError());
-    checkCudaErrors(cudaDeviceSynchronize());
+    // Progressive rendering with time-based frame capture
+    auto start_time = std::chrono::high_resolution_clock::now();
+    auto last_frame_time = start_time;
+    int frame_count = 0;
+    std::vector<double> frame_timestamps;  // Store timestamps for each frame
 
-    // Output
+    std::cerr << "Starting progressive render...\n";
+
+    for (int sample = 1; sample <= ns; sample++) {
+        // Render one sample
+        render_sample<<<blocks, threads>>>(accum_fb, nx, ny, cam_host.data, d_world, d_rand_state);
+        checkCudaErrors(cudaGetLastError());
+        checkCudaErrors(cudaDeviceSynchronize());
+
+        auto current_time = std::chrono::high_resolution_clock::now();
+        double elapsed_since_last_frame = std::chrono::duration<double>(current_time - last_frame_time).count();
+        double total_elapsed = std::chrono::duration<double>(current_time - start_time).count();
+
+        // Save a frame every ~1 second OR on the last sample
+        if (elapsed_since_last_frame >= 1.0 || sample == ns) {
+            std::ostringstream filename;
+            filename << "frames/frame_" << std::setfill('0') << std::setw(5) << frame_count << ".ppm";
+
+            save_frame_ppm(filename.str(), accum_fb, nx, ny, sample);
+            frame_timestamps.push_back(total_elapsed);
+
+            std::cerr << "\rSample " << sample << "/" << ns
+                      << " | Frame " << frame_count
+                      << " | Time: " << std::fixed << std::setprecision(1) << total_elapsed << "s"
+                      << std::flush;
+
+            frame_count++;
+            last_frame_time = current_time;
+        }
+    }
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    double total_time = std::chrono::duration<double>(end_time - start_time).count();
+
+    std::cerr << "\n\nRendering complete!\n";
+    std::cerr << "Total time: " << std::fixed << std::setprecision(2) << total_time << " seconds\n";
+    std::cerr << "Total frames saved: " << frame_count << "\n";
+    std::cerr << "Frames saved in: frames/\n\n";
+
+    // Output final image to stdout (PPM format)
     std::cout << "P3\n" << nx << " " << ny << "\n255\n";
     for (int j = ny-1; j >= 0; j--) {
         for (int i = 0; i < nx; i++) {
             size_t pixel_index = j * nx + i;
-            int ir = int(255.99 * fb[pixel_index].x());
-            int ig = int(255.99 * fb[pixel_index].y());
-            int ib = int(255.99 * fb[pixel_index].z());
+            vec3 col = accum_fb[pixel_index] / float(ns);
+            col = vec3(sqrt(fmax(0.0, col[0])), sqrt(fmax(0.0, col[1])), sqrt(fmax(0.0, col[2])));
+
+            int ir = int(255.99 * fmin(1.0, col.x()));
+            int ig = int(255.99 * fmin(1.0, col.y()));
+            int ib = int(255.99 * fmin(1.0, col.z()));
             std::cout << ir << " " << ig << " " << ib << "\n";
         }
     }
 
-    // Freeing memory
+    // Print GIF generation instructions
+    std::cerr << "To create a GIF showing render progress, run:\n";
+    std::cerr << "  convert -delay 100 -loop 0 frames/frame_*.ppm render_progress.gif\n";
+    std::cerr << "\nOr for a video (ffmpeg):\n";
+    std::cerr << "  ffmpeg -framerate 1 -pattern_type glob -i 'frames/frame_*.ppm' -c:v libx264 -pix_fmt yuv420p render_progress.mp4\n";
 
-    checkCudaErrors(cudaFree(fb));
+    // Freeing memory
+    checkCudaErrors(cudaFree(accum_fb));
     checkCudaErrors(cudaFree(d_rand_state));
     checkCudaErrors(cudaFree(d_list));
     checkCudaErrors(cudaFree(d_world));
