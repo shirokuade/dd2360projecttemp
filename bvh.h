@@ -45,8 +45,8 @@ class bvh_node : public hittable {
                     aabb box_a = objects[j]->bounding_box();
                     aabb box_b = objects[j + 1]->bounding_box();
 
-                    double a_val = box_a.axis_interval(axis).min;
-                    double b_val = box_b.axis_interval(axis).min;
+                    real_t a_val = box_a.axis_interval(axis).min;
+                    real_t b_val = box_b.axis_interval(axis).min;
 
                     if (a_val > b_val) {
                         // Swap

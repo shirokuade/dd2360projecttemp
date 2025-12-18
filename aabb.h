@@ -11,6 +11,7 @@
 // along with this software. If not, see <http://creativecommons.org/publicdomain/zero/1.0/>.
 //==============================================================================================
 
+#include "precision.h"
 
 class aabb {
   public:
@@ -64,7 +65,7 @@ class aabb {
 
         for (int axis = 0; axis < 3; axis++) {
             const interval& ax = axis_interval(axis);
-            const double adinv = 1.0 / ray_dir[axis];
+            const real_t adinv = REAL_CONST(1.0) / ray_dir[axis];
 
             auto t0 = (ax.min - ray_orig[axis]) * adinv;
             auto t1 = (ax.max - ray_orig[axis]) * adinv;
@@ -97,7 +98,7 @@ class aabb {
     __host__ __device__ void pad_to_minimums() {
         // Adjust the AABB so that no side is narrower than some delta, padding if necessary.
 
-        double delta = 0.0001;
+        real_t delta = REAL_CONST(0.0001);
         if (x.size() < delta) x = x.expand(delta);
         if (y.size() < delta) y = y.expand(delta);
         if (z.size() < delta) z = z.expand(delta);

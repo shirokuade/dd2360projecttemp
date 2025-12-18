@@ -11,11 +11,13 @@
 // along with this software. If not, see <http://creativecommons.org/publicdomain/zero/1.0/>.
 //==============================================================================================
 
+#include "precision.h"
+
 class texture {
   public:
     __device__ virtual ~texture() = default;
 
-    __device__ virtual color value(double u, double v, const point3& p) const = 0;
+    __device__ virtual color value(real_t u, real_t v, const point3& p) const = 0;
 };
 
 class solid_color : public texture {
@@ -24,9 +26,9 @@ class solid_color : public texture {
 
     __device__ solid_color(const color& c) : albedo(c) {}
 
-    __device__ solid_color(double red, double green, double blue) : solid_color(color(red,green,blue)) {}
+    __device__ solid_color(real_t red, real_t green, real_t blue) : solid_color(color(red,green,blue)) {}
 
-    __device__ color value(double u, double v, const point3& p) const override {
+    __device__ color value(real_t u, real_t v, const point3& p) const override {
         return albedo;
     }
 };

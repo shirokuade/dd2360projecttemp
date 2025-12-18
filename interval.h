@@ -9,16 +9,17 @@
 // along with this software. If not, see <http://creativecommons.org/publicdomain/zero/1.0/>.
 //==============================================================================================
 
+#include "precision.h"
 
 class interval {
   public:
-    double min, max;
+    real_t min, max;
 
     __host__ __device__
-    interval() : min(+1e30), max(-1e30) {} // Default interval is empty
+    interval() : min(+REAL_INF), max(-REAL_INF) {} // Default interval is empty
 
     __host__ __device__
-    interval(double min, double max) : min(min), max(max) {}
+    interval(real_t min, real_t max) : min(min), max(max) {}
 
     // Explicit copy constructor for CUDA compatibility
     __host__ __device__
@@ -40,42 +41,42 @@ class interval {
     }
 
     __host__ __device__
-    double size() const {
+    real_t size() const {
         return max - min;
     }
 
     __host__ __device__
-    bool contains(double x) const {
+    bool contains(real_t x) const {
         return min <= x && x <= max;
     }
 
     __host__ __device__
-    bool surrounds(double x) const {
+    bool surrounds(real_t x) const {
         return min < x && x < max;
     }
 
     __host__ __device__
-    double clamp(double x) const {
+    real_t clamp(real_t x) const {
         if (x < min) return min;
         if (x > max) return max;
         return x;
     }
 
     __host__ __device__
-    interval expand(double delta) const {
-        auto padding = delta/2;
+    interval expand(real_t delta) const {
+        auto padding = delta / REAL_CONST(2.0);
         return interval(min - padding, max + padding);
     }
 
 };
 
 __host__ __device__
-inline interval operator+(const interval& ival, double displacement) {
+inline interval operator+(const interval& ival, real_t displacement) {
     return interval(ival.min + displacement, ival.max + displacement);
 }
 
 __host__ __device__
-inline interval operator+(double displacement, const interval& ival) {
+inline interval operator+(real_t displacement, const interval& ival) {
     return ival + displacement;
 }
 

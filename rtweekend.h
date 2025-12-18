@@ -14,13 +14,15 @@
 #include <iostream>
 #include <limits>
 
-// Constants
-#define infinity 1e30
-#define pi 3.1415926535897932385
+#include "precision.h"
 
-// Utility Functions (host only, used for setup)
-__host__ __device__ inline double degrees_to_radians(double degrees) {
-    return degrees * pi / 180.0;
+// Constants
+#define infinity REAL_INF
+#define pi REAL_CONST(3.1415926535897932385)
+
+// Utility Functions
+__host__ __device__ inline real_t degrees_to_radians(real_t degrees) {
+    return degrees * pi / REAL_CONST(180.0);
 }
 
 // Common Headers

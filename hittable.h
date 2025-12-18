@@ -20,9 +20,9 @@ class hit_record {
     point3 p;
     vec3 normal;
     material *mat_ptr;
-    double t;
-    double u;
-    double v;
+    real_t t;
+    real_t u;
+    real_t v;
     bool front_face;
 
     __host__ __device__ hit_record() : mat_ptr(nullptr), t(0), u(0), v(0), front_face(false) {}
@@ -98,19 +98,19 @@ class translate : public hittable {
 class rotate_y : public hittable {
   public:
     hittable *object;
-    double sin_theta;
-    double cos_theta;
+    real_t sin_theta;
+    real_t cos_theta;
     aabb bbox;
 
     __device__
-    rotate_y(hittable *obj, double angle) : object(obj) {
-        auto radians = angle * 3.1415926535897932385 / 180.0;
+    rotate_y(hittable *obj, real_t angle) : object(obj) {
+        auto radians = angle * REAL_CONST(3.1415926535897932385) / REAL_CONST(180.0);
         sin_theta = sin(radians);
         cos_theta = cos(radians);
         bbox = object->bounding_box();
 
-        point3 min( 1e30,  1e30,  1e30);
-        point3 max(-1e30, -1e30, -1e30);
+        point3 min_pt( REAL_INF,  REAL_INF,  REAL_INF);
+        point3 max_pt(-REAL_INF, -REAL_INF, -REAL_INF);
 
         for (int i = 0; i < 2; i++) {
             for (int j = 0; j < 2; j++) {
@@ -125,14 +125,14 @@ class rotate_y : public hittable {
                     vec3 tester(newx, y, newz);
 
                     for (int c = 0; c < 3; c++) {
-                        min[c] = fmin(min[c], tester[c]);
-                        max[c] = fmax(max[c], tester[c]);
+                        min_pt[c] = REAL_FMIN(min_pt[c], tester[c]);
+                        max_pt[c] = REAL_FMAX(max_pt[c], tester[c]);
                     }
                 }
             }
         }
 
-        bbox = aabb(min, max);
+        bbox = aabb(min_pt, max_pt);
     }
 
     __device__ bool hit(const ray& r, interval ray_t, hit_record& rec) const override {

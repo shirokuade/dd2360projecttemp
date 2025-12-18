@@ -22,6 +22,7 @@
 #define USE_PINNED_MEMORY true    // Use pinned host memory for faster transfers
 #define USE_CONSTANT_MEMORY true  // Use constant memory for camera data
 #define BVH_OPTIM false           // Use BVH acceleration structure (true = O(log n), false = O(n))
+#define USE_DOUBLE_PRECISION true // Use double (64-bit) precision. Set to false for float (32-bit)
 //==============================================================================
 
 #include "rtweekend.h"
@@ -58,13 +59,13 @@ void check_cuda(cudaError_t result, char const *const func, const char *const fi
 
 // POD struct for constant memory (no constructors allowed in __constant__)
 struct CameraDataPOD {
-    double origin[3];
-    double lower_left_corner[3];
-    double horizontal[3];
-    double vertical[3];
-    double u[3], v[3], w[3];
-    float time0, time1;
-    float lens_radius;
+    real_t origin[3];
+    real_t lower_left_corner[3];
+    real_t horizontal[3];
+    real_t vertical[3];
+    real_t u[3], v[3], w[3];
+    real_t time0, time1;
+    real_t lens_radius;
     int image_width;
     int image_height;
 };
@@ -89,7 +90,7 @@ void copyToPOD(CameraDataPOD& pod, const CameraData& cam) {
 }
 
 // Device function to get ray from POD camera data
-__device__ ray get_ray_from_pod(const CameraDataPOD& cam, float s, float t, curandState *local_rand_state) {
+__device__ ray get_ray_from_pod(const CameraDataPOD& cam, real_t s, real_t t, curandState *local_rand_state) {
     vec3 origin(cam.origin[0], cam.origin[1], cam.origin[2]);
     vec3 lower_left(cam.lower_left_corner[0], cam.lower_left_corner[1], cam.lower_left_corner[2]);
     vec3 horizontal(cam.horizontal[0], cam.horizontal[1], cam.horizontal[2]);
@@ -99,7 +100,7 @@ __device__ ray get_ray_from_pod(const CameraDataPOD& cam, float s, float t, cura
 
     vec3 rd = cam.lens_radius * random_in_unit_disk(local_rand_state);
     vec3 offset = u * rd.x() + v * rd.y();
-    float time = cam.time0 + curand_uniform(local_rand_state) * (cam.time1 - cam.time0);
+    real_t time = cam.time0 + curand_uniform(local_rand_state) * (cam.time1 - cam.time0);
 
     return ray(origin + offset,
                lower_left + s * horizontal + t * vertical - origin - offset,
@@ -188,8 +189,8 @@ __global__ void render(vec3 *fb, int max_x, int max_y, int ns, hittable **world,
     vec3 col(0,0,0);
 
     for(int s=0; s < ns; s++) {
-        float u = float(i + curand_uniform(&local_rand_state)) / float(max_x);
-        float v = float(j + curand_uniform(&local_rand_state)) / float(max_y);
+        real_t u = real_t(i + curand_uniform(&local_rand_state)) / real_t(max_x);
+        real_t v = real_t(j + curand_uniform(&local_rand_state)) / real_t(max_y);
 
         // Use constant memory camera (POD version)
         ray r = get_ray_from_pod(d_camera_pod, u, v, &local_rand_state);
@@ -198,7 +199,7 @@ __global__ void render(vec3 *fb, int max_x, int max_y, int ns, hittable **world,
 
     rand_state[pixel_index] = local_rand_state;
 
-    col /= float(ns);
+    col /= real_t(ns);
     // Gamma correction
     col = vec3(sqrt(col[0]), sqrt(col[1]), sqrt(col[2]));
     fb[pixel_index] = col;
@@ -217,8 +218,8 @@ __global__ void render_param(vec3 *fb, int max_x, int max_y, int ns, CameraData 
     vec3 col(0,0,0);
 
     for(int s=0; s < ns; s++) {
-        float u = float(i + curand_uniform(&local_rand_state)) / float(max_x);
-        float v = float(j + curand_uniform(&local_rand_state)) / float(max_y);
+        real_t u = real_t(i + curand_uniform(&local_rand_state)) / real_t(max_x);
+        real_t v = real_t(j + curand_uniform(&local_rand_state)) / real_t(max_y);
 
         ray r = get_ray(cam, u, v, &local_rand_state);
         col += ray_color(r, world, &local_rand_state);
@@ -226,7 +227,7 @@ __global__ void render_param(vec3 *fb, int max_x, int max_y, int ns, CameraData 
 
     rand_state[pixel_index] = local_rand_state;
 
-    col /= float(ns);
+    col /= real_t(ns);
     // Gamma correction
     col = vec3(sqrt(col[0]), sqrt(col[1]), sqrt(col[2]));
     fb[pixel_index] = col;
@@ -243,8 +244,8 @@ __global__ void render_sample(vec3 *accum_fb, int max_x, int max_y, hittable **w
     curandState local_rand_state = rand_state[pixel_index];
 
     // Generate one sample using constant memory camera (POD version)
-    float u = float(i + curand_uniform(&local_rand_state)) / float(max_x);
-    float v = float(j + curand_uniform(&local_rand_state)) / float(max_y);
+    real_t u = real_t(i + curand_uniform(&local_rand_state)) / real_t(max_x);
+    real_t v = real_t(j + curand_uniform(&local_rand_state)) / real_t(max_y);
 
     ray r = get_ray_from_pod(d_camera_pod, u, v, &local_rand_state);
     vec3 col = ray_color(r, world, &local_rand_state);
@@ -290,6 +291,7 @@ int main() {
     std::cerr << "Pinned memory: " << (USE_PINNED_MEMORY ? "YES" : "NO") << "\n";
     std::cerr << "Constant memory: " << (USE_CONSTANT_MEMORY ? "YES" : "NO") << "\n";
     std::cerr << "BVH acceleration: " << (BVH_OPTIM ? "YES (O(log n))" : "NO (O(n))") << "\n";
+    std::cerr << "Precision: " << (USE_DOUBLE_PRECISION ? "double (64-bit)" : "float (32-bit)") << "\n";
 
     // IMPORTANT: Set limits FIRST, before any CUDA allocations or kernel launches
     checkCudaErrors(cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1024 * 1024 * 256)); // 256MB heap

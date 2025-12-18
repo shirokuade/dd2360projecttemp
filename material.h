@@ -19,7 +19,7 @@ class material {
   public:
     __device__ virtual ~material() = default;
 
-    __device__ virtual color emitted(double u, double v, const point3& p) const {
+    __device__ virtual color emitted(real_t u, real_t v, const point3& p) const {
         return color(0,0,0);
     }
 
@@ -37,7 +37,7 @@ class constant_texture : public texture {
 
     __device__ constant_texture(const color& c) : albedo(c) {}
 
-    __device__ color value(double u, double v, const point3& p) const override {
+    __device__ color value(real_t u, real_t v, const point3& p) const override {
         return albedo;
     }
 };
@@ -68,7 +68,7 @@ class diffuse_light : public material {
 
     __device__ diffuse_light(texture *t) : tex(t) {}
 
-    __device__ color emitted(double u, double v, const point3& p) const override {
+    __device__ color emitted(real_t u, real_t v, const point3& p) const override {
         return tex->value(u, v, p);
     }
 };

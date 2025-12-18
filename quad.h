@@ -16,10 +16,10 @@
 class xy_rect : public hittable {
   public:
     material *mp;
-    double x0, x1, y0, y1, k;
+    real_t x0, x1, y0, y1, k;
 
     __device__ xy_rect() {}
-    __device__ xy_rect(double _x0, double _x1, double _y0, double _y1, double _k, material *mat)
+    __device__ xy_rect(real_t _x0, real_t _x1, real_t _y0, real_t _y1, real_t _k, material *mat)
         : x0(_x0), x1(_x1), y0(_y0), y1(_y1), k(_k), mp(mat) {}
 
     __device__ bool hit(const ray& r, interval ray_t, hit_record& rec) const override {
@@ -43,7 +43,7 @@ class xy_rect : public hittable {
     }
 
     __device__ aabb bounding_box() const override {
-        return aabb(point3(x0, y0, k - 0.0001), point3(x1, y1, k + 0.0001));
+        return aabb(point3(x0, y0, k - REAL_CONST(0.0001)), point3(x1, y1, k + REAL_CONST(0.0001)));
     }
 };
 
@@ -51,10 +51,10 @@ class xy_rect : public hittable {
 class xz_rect : public hittable {
   public:
     material *mp;
-    double x0, x1, z0, z1, k;
+    real_t x0, x1, z0, z1, k;
 
     __device__ xz_rect() {}
-    __device__ xz_rect(double _x0, double _x1, double _z0, double _z1, double _k, material *mat)
+    __device__ xz_rect(real_t _x0, real_t _x1, real_t _z0, real_t _z1, real_t _k, material *mat)
         : x0(_x0), x1(_x1), z0(_z0), z1(_z1), k(_k), mp(mat) {}
 
     __device__ bool hit(const ray& r, interval ray_t, hit_record& rec) const override {
@@ -78,7 +78,7 @@ class xz_rect : public hittable {
     }
 
     __device__ aabb bounding_box() const override {
-        return aabb(point3(x0, k - 0.0001, z0), point3(x1, k + 0.0001, z1));
+        return aabb(point3(x0, k - REAL_CONST(0.0001), z0), point3(x1, k + REAL_CONST(0.0001), z1));
     }
 };
 
@@ -86,10 +86,10 @@ class xz_rect : public hittable {
 class yz_rect : public hittable {
   public:
     material *mp;
-    double y0, y1, z0, z1, k;
+    real_t y0, y1, z0, z1, k;
 
     __device__ yz_rect() {}
-    __device__ yz_rect(double _y0, double _y1, double _z0, double _z1, double _k, material *mat)
+    __device__ yz_rect(real_t _y0, real_t _y1, real_t _z0, real_t _z1, real_t _k, material *mat)
         : y0(_y0), y1(_y1), z0(_z0), z1(_z1), k(_k), mp(mat) {}
 
     __device__ bool hit(const ray& r, interval ray_t, hit_record& rec) const override {
@@ -113,7 +113,7 @@ class yz_rect : public hittable {
     }
 
     __device__ aabb bounding_box() const override {
-        return aabb(point3(k - 0.0001, y0, z0), point3(k + 0.0001, y1, z1));
+        return aabb(point3(k - REAL_CONST(0.0001), y0, z0), point3(k + REAL_CONST(0.0001), y1, z1));
     }
 };
 
@@ -149,8 +149,8 @@ class box : public hittable {
         num_sides = 6;
         sides = new hittable*[6];
 
-        auto min_pt = point3(fmin(p0.x(), p1.x()), fmin(p0.y(), p1.y()), fmin(p0.z(), p1.z()));
-        auto max_pt = point3(fmax(p0.x(), p1.x()), fmax(p0.y(), p1.y()), fmax(p0.z(), p1.z()));
+        auto min_pt = point3(REAL_FMIN(p0.x(), p1.x()), REAL_FMIN(p0.y(), p1.y()), REAL_FMIN(p0.z(), p1.z()));
+        auto max_pt = point3(REAL_FMAX(p0.x(), p1.x()), REAL_FMAX(p0.y(), p1.y()), REAL_FMAX(p0.z(), p1.z()));
 
         // Front and back (XY planes)
         sides[0] = new xy_rect(min_pt.x(), max_pt.x(), min_pt.y(), max_pt.y(), max_pt.z(), mat);

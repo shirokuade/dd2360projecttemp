@@ -17,7 +17,7 @@ class ray {
   public:
     __host__ __device__ ray() : tm(0) {}
 
-    __host__ __device__ ray(const point3& origin, const vec3& direction, double time)
+    __host__ __device__ ray(const point3& origin, const vec3& direction, real_t time)
       : orig(origin), dir(direction), tm(time) {}
 
     __host__ __device__ ray(const point3& origin, const vec3& direction)
@@ -38,16 +38,16 @@ class ray {
     __host__ __device__ const point3& origin() const  { return orig; }
     __host__ __device__ const vec3& direction() const { return dir; }
 
-    __host__ __device__ double time() const { return tm; }
+    __host__ __device__ real_t time() const { return tm; }
 
-    __host__ __device__ point3 at(double t) const {
+    __host__ __device__ point3 at(real_t t) const {
         return orig + t*dir;
     }
 
   private:
     point3 orig;
     vec3 dir;
-    double tm;
+    real_t tm;
 };
 
 
