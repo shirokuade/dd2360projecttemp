@@ -21,12 +21,14 @@
 #define NUM_STREAMS 4             // Number of CUDA streams for parallel execution
 #define USE_PINNED_MEMORY true    // Use pinned host memory for faster transfers
 #define USE_CONSTANT_MEMORY true  // Use constant memory for camera data
+#define BVH_OPTIM false           // Use BVH acceleration structure (true = O(log n), false = O(n))
 //==============================================================================
 
 #include "rtweekend.h"
 #include "camera.h"
 #include "hittable.h"
 #include "hittable_list.h"
+#include "bvh.h"
 #include "material.h"
 #include "quad.h"
 #include "texture.h"
@@ -116,8 +118,8 @@ __global__ void render_init(int max_x, int max_y, curandState *rand_state, int y
 }
 
 
-// Creates Cornell Box
-__global__ void create_world(hittable **d_list, hittable **d_world) {
+// Creates Cornell Box - with optional BVH acceleration
+__global__ void create_world(hittable **d_list, hittable **d_world, bool use_bvh) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         int i = 0;
         material *red   = new lambertian( new constant_texture(vec3(0.65, 0.05, 0.05)) );
@@ -135,7 +137,13 @@ __global__ void create_world(hittable **d_list, hittable **d_world) {
         d_list[i++] = new translate(new rotate_y(new box(vec3(0, 0, 0), vec3(165, 165, 165), white), -18), vec3(130,0,65));
         d_list[i++] = new translate(new rotate_y(new box(vec3(0, 0, 0), vec3(165, 330, 165), white),  15), vec3(265,0,295));
 
-        *d_world = new hittable_list(d_list, i);
+        if (use_bvh) {
+            // Build BVH tree for O(log n) intersection tests
+            *d_world = new bvh_tree(d_list, i);
+        } else {
+            // Use linear list for O(n) intersection tests
+            *d_world = new hittable_list(d_list, i);
+        }
     }
 }
 
@@ -281,6 +289,7 @@ int main() {
     std::cerr << "Streams: " << NUM_STREAMS << "\n";
     std::cerr << "Pinned memory: " << (USE_PINNED_MEMORY ? "YES" : "NO") << "\n";
     std::cerr << "Constant memory: " << (USE_CONSTANT_MEMORY ? "YES" : "NO") << "\n";
+    std::cerr << "BVH acceleration: " << (BVH_OPTIM ? "YES (O(log n))" : "NO (O(n))") << "\n";
 
     // IMPORTANT: Set limits FIRST, before any CUDA allocations or kernel launches
     checkCudaErrors(cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1024 * 1024 * 256)); // 256MB heap
@@ -340,7 +349,7 @@ int main() {
     hittable **d_world;
     checkCudaErrors(cudaMalloc((void **)&d_world, sizeof(hittable *)));     // Pointer to the list itself
 
-    create_world<<<1, 1>>>(d_list, d_world);
+    create_world<<<1, 1>>>(d_list, d_world, BVH_OPTIM);
     checkCudaErrors(cudaGetLastError());
     checkCudaErrors(cudaDeviceSynchronize());
 
