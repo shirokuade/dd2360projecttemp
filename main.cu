@@ -10,18 +10,8 @@
 //==============================================================================================
 
 //==============================================================================
-// CONFIGURATION
+// COMPILE-TIME CONFIGURATION (cannot be changed at runtime)
 //==============================================================================
-#define PROGRESSIVE_RENDER false  // Set to true to enable progress frames (slower)
-                                  // Set to false for maximum performance (no preview)
-
-// OPTIMIZATION SETTINGS
-#define BLOCK_SIZE_X 32           // Thread block X dimension (32 = 1 warp per row for better coalescing)
-#define BLOCK_SIZE_Y 8            // Thread block Y dimension (32x8 = 256 threads)
-#define NUM_STREAMS 4             // Number of CUDA streams for parallel execution
-#define USE_PINNED_MEMORY true    // Use pinned host memory for faster transfers
-#define USE_CONSTANT_MEMORY true  // Use constant memory for camera data
-#define BVH_OPTIM false           // Use BVH acceleration structure (true = O(log n), false = O(n))
 #define USE_DOUBLE_PRECISION true // Use double (64-bit) precision. Set to false for float (32-bit)
 //==============================================================================
 
@@ -42,9 +32,108 @@
 #include <sys/stat.h>
 #include <cstdlib>
 #include <curand_kernel.h>
+#include <algorithm>
+#include <map>
 #include "vec3.h"
 #include "ray.h"
 #include "material.h"
+
+//==============================================================================
+// RUNTIME CONFIGURATION
+//==============================================================================
+struct Config {
+    // Rendering settings
+    bool progressive_render = false;
+    int samples_per_pixel = 100;
+    int image_width = 600;
+    int image_height = 600;
+
+    // CUDA optimization settings
+    int block_size_x = 32;
+    int block_size_y = 8;
+    int num_streams = 4;
+
+    // Memory settings
+    bool use_pinned_memory = true;
+    bool use_constant_memory = true;
+
+    // Acceleration settings
+    bool bvh_optim = false;
+};
+
+// Trim whitespace from string
+std::string trim(const std::string& str) {
+    size_t first = str.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return "";
+    size_t last = str.find_last_not_of(" \t\r\n");
+    return str.substr(first, last - first + 1);
+}
+
+// Parse boolean value
+bool parse_bool(const std::string& value) {
+    std::string v = trim(value);
+    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+    return (v == "true" || v == "1" || v == "yes");
+}
+
+// Load configuration from file
+Config load_config(const std::string& filename) {
+    Config config;
+    std::ifstream file(filename);
+
+    if (!file.is_open()) {
+        std::cerr << "Warning: Could not open " << filename << ", using default values.\n";
+        return config;
+    }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        // Skip comments and empty lines
+        line = trim(line);
+        if (line.empty() || line[0] == '#') continue;
+
+        // Find '=' separator
+        size_t pos = line.find('=');
+        if (pos == std::string::npos) continue;
+
+        std::string key = trim(line.substr(0, pos));
+        std::string value = trim(line.substr(pos + 1));
+
+        // Remove inline comments
+        size_t comment_pos = value.find('#');
+        if (comment_pos != std::string::npos) {
+            value = trim(value.substr(0, comment_pos));
+        }
+
+        // Parse configuration values
+        if (key == "PROGRESSIVE_RENDER") {
+            config.progressive_render = parse_bool(value);
+        } else if (key == "SAMPLES_PER_PIXEL") {
+            config.samples_per_pixel = std::stoi(value);
+        } else if (key == "IMAGE_WIDTH") {
+            config.image_width = std::stoi(value);
+        } else if (key == "IMAGE_HEIGHT") {
+            config.image_height = std::stoi(value);
+        } else if (key == "BLOCK_SIZE_X") {
+            config.block_size_x = std::stoi(value);
+        } else if (key == "BLOCK_SIZE_Y") {
+            config.block_size_y = std::stoi(value);
+        } else if (key == "NUM_STREAMS") {
+            config.num_streams = std::stoi(value);
+        } else if (key == "USE_PINNED_MEMORY") {
+            config.use_pinned_memory = parse_bool(value);
+        } else if (key == "USE_CONSTANT_MEMORY") {
+            config.use_constant_memory = parse_bool(value);
+        } else if (key == "BVH_OPTIM") {
+            config.bvh_optim = parse_bool(value);
+        }
+    }
+
+    file.close();
+    return config;
+}
+
+//==============================================================================
 
 // Error checking macro
 #define checkCudaErrors(val) check_cuda( (val), #val, __FILE__, __LINE__ )
@@ -278,20 +367,26 @@ void save_frame_ppm(const std::string& filename, vec3* fb, int nx, int ny, int n
 }
 
 int main() {
-    int nx = 600; // Resolution
-    int ny = 600;
-    int ns = 100; // Total samples per pixel
-    int tx = BLOCK_SIZE_X;
-    int ty = BLOCK_SIZE_Y;
+    // Load configuration from file
+    Config cfg = load_config("config.conf");
 
-    std::cerr << "Rendering a " << nx << "x" << ny << " image with " << ns << " samples.\n";
-    std::cerr << "Progressive rendering: " << (PROGRESSIVE_RENDER ? "ENABLED (slower)" : "DISABLED (fast)") << "\n";
+    int nx = cfg.image_width;
+    int ny = cfg.image_height;
+    int ns = cfg.samples_per_pixel;
+    int tx = cfg.block_size_x;
+    int ty = cfg.block_size_y;
+    int num_streams = cfg.num_streams;
+
+    std::cerr << "=== Ray Tracer Configuration ===\n";
+    std::cerr << "Image: " << nx << "x" << ny << " with " << ns << " samples\n";
+    std::cerr << "Progressive rendering: " << (cfg.progressive_render ? "ENABLED (slower)" : "DISABLED (fast)") << "\n";
     std::cerr << "Block size: " << tx << "x" << ty << " = " << (tx*ty) << " threads/block\n";
-    std::cerr << "Streams: " << NUM_STREAMS << "\n";
-    std::cerr << "Pinned memory: " << (USE_PINNED_MEMORY ? "YES" : "NO") << "\n";
-    std::cerr << "Constant memory: " << (USE_CONSTANT_MEMORY ? "YES" : "NO") << "\n";
-    std::cerr << "BVH acceleration: " << (BVH_OPTIM ? "YES (O(log n))" : "NO (O(n))") << "\n";
+    std::cerr << "Streams: " << num_streams << "\n";
+    std::cerr << "Pinned memory: " << (cfg.use_pinned_memory ? "YES" : "NO") << "\n";
+    std::cerr << "Constant memory: " << (cfg.use_constant_memory ? "YES" : "NO") << "\n";
+    std::cerr << "BVH acceleration: " << (cfg.bvh_optim ? "YES (O(log n))" : "NO (O(n))") << "\n";
     std::cerr << "Precision: " << (USE_DOUBLE_PRECISION ? "double (64-bit)" : "float (32-bit)") << "\n";
+    std::cerr << "================================\n";
 
     // IMPORTANT: Set limits FIRST, before any CUDA allocations or kernel launches
     checkCudaErrors(cudaDeviceSetLimit(cudaLimitMallocHeapSize, 1024 * 1024 * 256)); // 256MB heap
@@ -307,12 +402,12 @@ int main() {
     // Allocate device memory
     checkCudaErrors(cudaMalloc((void **)&d_fb, fb_size));
 
-    // Allocate host memory (pinned for faster transfers)
-    #if USE_PINNED_MEMORY
-    checkCudaErrors(cudaHostAlloc((void **)&h_fb, fb_size, cudaHostAllocDefault));
-    #else
-    h_fb = new vec3[num_pixels];
-    #endif
+    // Allocate host memory (pinned for faster transfers if enabled)
+    if (cfg.use_pinned_memory) {
+        checkCudaErrors(cudaHostAlloc((void **)&h_fb, fb_size, cudaHostAllocDefault));
+    } else {
+        h_fb = new vec3[num_pixels];
+    }
 
     // Initialize device framebuffer to zero
     checkCudaErrors(cudaMemset(d_fb, 0, fb_size));
@@ -321,19 +416,19 @@ int main() {
     curandState *d_rand_state;
     checkCudaErrors(cudaMalloc((void **)&d_rand_state, num_pixels * sizeof(curandState)));
 
-    // Create CUDA streams
-    cudaStream_t streams[NUM_STREAMS];
-    for (int s = 0; s < NUM_STREAMS; s++) {
+    // Create CUDA streams (dynamic allocation)
+    std::vector<cudaStream_t> streams(num_streams);
+    for (int s = 0; s < num_streams; s++) {
         checkCudaErrors(cudaStreamCreate(&streams[s]));
     }
 
     // Init Random State (can be done in parallel with streams)
     dim3 threads(tx, ty);
-    int rows_per_stream = (ny + NUM_STREAMS - 1) / NUM_STREAMS;
+    int rows_per_stream = (ny + num_streams - 1) / num_streams;
 
-    for (int s = 0; s < NUM_STREAMS; s++) {
+    for (int s = 0; s < num_streams; s++) {
         int y_offset = s * rows_per_stream;
-        int y_size = min(rows_per_stream, ny - y_offset);
+        int y_size = std::min(rows_per_stream, ny - y_offset);
         if (y_size <= 0) continue;
 
         dim3 blocks((nx + tx - 1) / tx, (y_size + ty - 1) / ty);
@@ -341,7 +436,7 @@ int main() {
     }
 
     // Synchronize all streams
-    for (int s = 0; s < NUM_STREAMS; s++) {
+    for (int s = 0; s < num_streams; s++) {
         checkCudaErrors(cudaStreamSynchronize(streams[s]));
     }
     checkCudaErrors(cudaGetLastError());
@@ -351,7 +446,7 @@ int main() {
     hittable **d_world;
     checkCudaErrors(cudaMalloc((void **)&d_world, sizeof(hittable *)));     // Pointer to the list itself
 
-    create_world<<<1, 1>>>(d_list, d_world, BVH_OPTIM);
+    create_world<<<1, 1>>>(d_list, d_world, cfg.bvh_optim);
     checkCudaErrors(cudaGetLastError());
     checkCudaErrors(cudaDeviceSynchronize());
 
@@ -364,16 +459,16 @@ int main() {
 
     camera_host cam_host(lookfrom, lookat, vec3(0,1,0), vfov, float(nx)/float(ny), aperture, dist_to_focus, 0.0, 1.0, nx, ny);
 
-    // Copy camera data to constant memory (using POD struct)
-    #if USE_CONSTANT_MEMORY
+    // Copy camera data to constant memory (using POD struct) if enabled
     CameraDataPOD cam_pod;
-    copyToPOD(cam_pod, cam_host.data);
-    checkCudaErrors(cudaMemcpyToSymbol(d_camera_pod, &cam_pod, sizeof(CameraDataPOD)));
-    #endif
+    if (cfg.use_constant_memory) {
+        copyToPOD(cam_pod, cam_host.data);
+        checkCudaErrors(cudaMemcpyToSymbol(d_camera_pod, &cam_pod, sizeof(CameraDataPOD)));
+    }
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    if (PROGRESSIVE_RENDER) {
+    if (cfg.progressive_render) {
         // Progressive rendering with time-based frame capture
         // Remove old frames directory and create fresh one
         system("rm -rf frames");
@@ -447,24 +542,24 @@ int main() {
 
     } else {
         // Fast rendering with streams - divide image into horizontal strips
-        std::cerr << "Starting fast render with " << NUM_STREAMS << " streams...\n";
+        std::cerr << "Starting fast render with " << num_streams << " streams...\n";
 
-        for (int s = 0; s < NUM_STREAMS; s++) {
+        for (int s = 0; s < num_streams; s++) {
             int y_offset = s * rows_per_stream;
-            int y_size = min(rows_per_stream, ny - y_offset);
+            int y_size = std::min(rows_per_stream, ny - y_offset);
             if (y_size <= 0) continue;
 
             dim3 blocks((nx + tx - 1) / tx, (y_size + ty - 1) / ty);
 
-            #if USE_CONSTANT_MEMORY
-            render<<<blocks, threads, 0, streams[s]>>>(d_fb, nx, ny, ns, d_world, d_rand_state, y_offset, y_size);
-            #else
-            render_param<<<blocks, threads, 0, streams[s]>>>(d_fb, nx, ny, ns, cam_host.data, d_world, d_rand_state, y_offset, y_size);
-            #endif
+            if (cfg.use_constant_memory) {
+                render<<<blocks, threads, 0, streams[s]>>>(d_fb, nx, ny, ns, d_world, d_rand_state, y_offset, y_size);
+            } else {
+                render_param<<<blocks, threads, 0, streams[s]>>>(d_fb, nx, ny, ns, cam_host.data, d_world, d_rand_state, y_offset, y_size);
+            }
         }
 
         // Synchronize all streams
-        for (int s = 0; s < NUM_STREAMS; s++) {
+        for (int s = 0; s < num_streams; s++) {
             checkCudaErrors(cudaStreamSynchronize(streams[s]));
         }
         checkCudaErrors(cudaGetLastError());
@@ -476,12 +571,12 @@ int main() {
         std::cerr << "Total time: " << std::fixed << std::setprecision(2) << total_time << " seconds\n";
 
         // Copy framebuffer to host (async with pinned memory)
-        #if USE_PINNED_MEMORY
-        checkCudaErrors(cudaMemcpyAsync(h_fb, d_fb, fb_size, cudaMemcpyDeviceToHost, streams[0]));
-        checkCudaErrors(cudaStreamSynchronize(streams[0]));
-        #else
-        checkCudaErrors(cudaMemcpy(h_fb, d_fb, fb_size, cudaMemcpyDeviceToHost));
-        #endif
+        if (cfg.use_pinned_memory) {
+            checkCudaErrors(cudaMemcpyAsync(h_fb, d_fb, fb_size, cudaMemcpyDeviceToHost, streams[0]));
+            checkCudaErrors(cudaStreamSynchronize(streams[0]));
+        } else {
+            checkCudaErrors(cudaMemcpy(h_fb, d_fb, fb_size, cudaMemcpyDeviceToHost));
+        }
 
         // Output final image (already normalized in kernel)
         std::cout << "P3\n" << nx << " " << ny << "\n255\n";
@@ -497,17 +592,17 @@ int main() {
     }
 
     // Destroy streams
-    for (int s = 0; s < NUM_STREAMS; s++) {
+    for (int s = 0; s < num_streams; s++) {
         checkCudaErrors(cudaStreamDestroy(streams[s]));
     }
 
     // Freeing memory
     checkCudaErrors(cudaFree(d_fb));
-    #if USE_PINNED_MEMORY
-    checkCudaErrors(cudaFreeHost(h_fb));
-    #else
-    delete[] h_fb;
-    #endif
+    if (cfg.use_pinned_memory) {
+        checkCudaErrors(cudaFreeHost(h_fb));
+    } else {
+        delete[] h_fb;
+    }
     checkCudaErrors(cudaFree(d_rand_state));
     checkCudaErrors(cudaFree(d_list));
     checkCudaErrors(cudaFree(d_world));
