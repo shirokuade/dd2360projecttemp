@@ -62,6 +62,7 @@ struct Config {
 
     // Persistent threads settings
     bool use_persistent_threads = false;
+    bool use_tiled_persistent = false;  // Tiled version (better cache locality)
 };
 
 // Trim whitespace from string
@@ -131,6 +132,8 @@ Config load_config(const std::string& filename) {
             config.bvh_optim = parse_bool(value);
         } else if (key == "USE_PERSISTENT_THREADS") {
             config.use_persistent_threads = parse_bool(value);
+        } else if (key == "USE_TILED_PERSISTENT") {
+            config.use_tiled_persistent = parse_bool(value);
         }
     }
 
@@ -366,6 +369,76 @@ __global__ void render_persistent(vec3 *fb, int max_x, int max_y, int ns,
     }
 }
 
+// Tiled persistent threads render kernel - thread blocks grab tiles, threads cooperate on pixels
+// This reduces atomic contention and improves cache locality
+#define TILE_SIZE 16  // 16x16 = 256 pixels per tile (matches block size)
+
+__global__ void render_tiled_persistent(vec3 *fb, int max_x, int max_y, int ns,
+                                         hittable **world, curandState *rand_state,
+                                         int *tile_counter, int tiles_x, int tiles_y) {
+    // Shared variable for tile index - only one thread per block does atomic
+    __shared__ int tile_idx;
+
+    // Total number of tiles
+    int total_tiles = tiles_x * tiles_y;
+
+    // Thread's position within the block (for processing pixels within a tile)
+    int local_id = threadIdx.x;
+    int local_x = local_id % TILE_SIZE;
+    int local_y = local_id / TILE_SIZE;
+
+    // Loop: each iteration, the block grabs a new tile
+    while (true) {
+        // Thread 0 grabs the next tile atomically
+        if (threadIdx.x == 0) {
+            tile_idx = atomicAdd(tile_counter, 1);
+        }
+
+        // All threads wait for thread 0 to get the tile index
+        __syncthreads();
+
+        // Exit if no more tiles
+        if (tile_idx >= total_tiles) return;
+
+        // Calculate tile's top-left corner
+        int tile_x = (tile_idx % tiles_x) * TILE_SIZE;
+        int tile_y = (tile_idx / tiles_x) * TILE_SIZE;
+
+        // Calculate this thread's pixel coordinates
+        int pixel_x = tile_x + local_x;
+        int pixel_y = tile_y + local_y;
+
+        // Sync before potentially exiting to ensure all threads participate in next iteration
+        __syncthreads();
+
+        // Bounds check - some threads may be outside image for edge tiles
+        if (pixel_x >= max_x || pixel_y >= max_y) continue;
+
+        int pixel_index = pixel_y * max_x + pixel_x;
+
+        // Load random state for this pixel
+        curandState local_rand_state = rand_state[pixel_index];
+        vec3 col(0,0,0);
+
+        // Render all samples for this pixel
+        for (int s = 0; s < ns; s++) {
+            real_t u = real_t(pixel_x + curand_uniform(&local_rand_state)) / real_t(max_x);
+            real_t v = real_t(pixel_y + curand_uniform(&local_rand_state)) / real_t(max_y);
+
+            ray r = get_ray_from_pod(d_camera_pod, u, v, &local_rand_state);
+            col += ray_color(r, world, &local_rand_state);
+        }
+
+        // Save random state back
+        rand_state[pixel_index] = local_rand_state;
+
+        // Normalize and gamma correct
+        col /= real_t(ns);
+        col = vec3(sqrt(col[0]), sqrt(col[1]), sqrt(col[2]));
+        fb[pixel_index] = col;
+    }
+}
+
 // Progressive render kernel - renders a single sample and accumulates (for progress visualization)
 __global__ void render_sample(vec3 *accum_fb, int max_x, int max_y, hittable **world, curandState *rand_state) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
@@ -429,7 +502,8 @@ int main() {
     std::cerr << "Pinned memory: " << (cfg.use_pinned_memory ? "YES" : "NO") << "\n";
     std::cerr << "Constant memory: " << (cfg.use_constant_memory ? "YES" : "NO") << "\n";
     std::cerr << "BVH acceleration: " << (cfg.bvh_optim ? "YES (O(log n))" : "NO (O(n))") << "\n";
-    std::cerr << "Persistent threads: " << (cfg.use_persistent_threads ? "YES (dynamic load balancing)" : "NO") << "\n";
+    std::cerr << "Persistent threads: " << (cfg.use_persistent_threads ? "YES (per-pixel)" : "NO") << "\n";
+    std::cerr << "Tiled persistent: " << (cfg.use_tiled_persistent ? "YES (16x16 tiles)" : "NO") << "\n";
     std::cerr << "Precision: " << (USE_DOUBLE_PRECISION ? "double (64-bit)" : "float (32-bit)") << "\n";
     std::cerr << "================================\n";
 
@@ -584,6 +658,63 @@ int main() {
 
         std::cerr << "\nTo create a GIF showing render progress, run:\n";
         std::cerr << "  python make_gif.py render_progress 1\n";
+
+    } else if (cfg.use_tiled_persistent) {
+        // Tiled persistent threads rendering - blocks grab tiles dynamically
+        std::cerr << "Starting render with tiled persistent threads (16x16 tiles)...\n";
+
+        // Allocate tile counter on device
+        int *d_tile_counter;
+        checkCudaErrors(cudaMalloc((void **)&d_tile_counter, sizeof(int)));
+        checkCudaErrors(cudaMemset(d_tile_counter, 0, sizeof(int)));
+
+        // Calculate number of tiles
+        int tiles_x = (nx + TILE_SIZE - 1) / TILE_SIZE;
+        int tiles_y = (ny + TILE_SIZE - 1) / TILE_SIZE;
+        int total_tiles = tiles_x * tiles_y;
+
+        std::cerr << "Tiles: " << tiles_x << "x" << tiles_y << " = " << total_tiles << " total\n";
+
+        // Launch enough blocks to saturate GPU
+        // Each block has TILE_SIZE * TILE_SIZE = 256 threads
+        int threads_per_block = TILE_SIZE * TILE_SIZE;  // 256
+        int num_blocks = 256;  // Enough to saturate GPU
+
+        render_tiled_persistent<<<num_blocks, threads_per_block>>>(
+            d_fb, nx, ny, ns, d_world, d_rand_state,
+            d_tile_counter, tiles_x, tiles_y);
+
+        checkCudaErrors(cudaGetLastError());
+        checkCudaErrors(cudaDeviceSynchronize());
+
+        auto end_time = std::chrono::high_resolution_clock::now();
+        double total_time = std::chrono::duration<double>(end_time - start_time).count();
+
+        std::cerr << "Rendering complete!\n";
+        std::cerr << "Total time: " << std::fixed << std::setprecision(2) << total_time << " seconds\n";
+
+        // Cleanup tile counter
+        checkCudaErrors(cudaFree(d_tile_counter));
+
+        // Copy framebuffer to host
+        if (cfg.use_pinned_memory) {
+            checkCudaErrors(cudaMemcpyAsync(h_fb, d_fb, fb_size, cudaMemcpyDeviceToHost, streams[0]));
+            checkCudaErrors(cudaStreamSynchronize(streams[0]));
+        } else {
+            checkCudaErrors(cudaMemcpy(h_fb, d_fb, fb_size, cudaMemcpyDeviceToHost));
+        }
+
+        // Output final image
+        std::cout << "P3\n" << nx << " " << ny << "\n255\n";
+        for (int j = ny-1; j >= 0; j--) {
+            for (int i = 0; i < nx; i++) {
+                size_t pixel_index = j * nx + i;
+                int ir = int(255.99 * h_fb[pixel_index].x());
+                int ig = int(255.99 * h_fb[pixel_index].y());
+                int ib = int(255.99 * h_fb[pixel_index].z());
+                std::cout << ir << " " << ig << " " << ib << "\n";
+            }
+        }
 
     } else if (cfg.use_persistent_threads) {
         // Persistent threads rendering - dynamic load balancing
