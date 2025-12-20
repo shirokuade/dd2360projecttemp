@@ -59,6 +59,9 @@ struct Config {
 
     // Acceleration settings
     bool bvh_optim = false;
+
+    // Persistent threads settings
+    bool use_persistent_threads = false;
 };
 
 // Trim whitespace from string
@@ -126,6 +129,8 @@ Config load_config(const std::string& filename) {
             config.use_constant_memory = parse_bool(value);
         } else if (key == "BVH_OPTIM") {
             config.bvh_optim = parse_bool(value);
+        } else if (key == "USE_PERSISTENT_THREADS") {
+            config.use_persistent_threads = parse_bool(value);
         }
     }
 
@@ -322,6 +327,45 @@ __global__ void render_param(vec3 *fb, int max_x, int max_y, int ns, CameraData 
     fb[pixel_index] = col;
 }
 
+// Persistent threads render kernel - threads grab work from atomic counter
+__global__ void render_persistent(vec3 *fb, int max_x, int max_y, int ns,
+                                   hittable **world, curandState *rand_state,
+                                   int *work_counter, int total_pixels) {
+    // Each thread loops, grabbing pixels until all work is done
+    while (true) {
+        // Atomically grab next pixel index
+        int pixel_index = atomicAdd(work_counter, 1);
+
+        // Exit if no more work
+        if (pixel_index >= total_pixels) return;
+
+        // Convert linear index to (i, j) coordinates
+        int i = pixel_index % max_x;
+        int j = pixel_index / max_x;
+
+        // Load random state for this pixel
+        curandState local_rand_state = rand_state[pixel_index];
+        vec3 col(0,0,0);
+
+        // Render all samples for this pixel
+        for (int s = 0; s < ns; s++) {
+            real_t u = real_t(i + curand_uniform(&local_rand_state)) / real_t(max_x);
+            real_t v = real_t(j + curand_uniform(&local_rand_state)) / real_t(max_y);
+
+            ray r = get_ray_from_pod(d_camera_pod, u, v, &local_rand_state);
+            col += ray_color(r, world, &local_rand_state);
+        }
+
+        // Save random state back
+        rand_state[pixel_index] = local_rand_state;
+
+        // Normalize and gamma correct
+        col /= real_t(ns);
+        col = vec3(sqrt(col[0]), sqrt(col[1]), sqrt(col[2]));
+        fb[pixel_index] = col;
+    }
+}
+
 // Progressive render kernel - renders a single sample and accumulates (for progress visualization)
 __global__ void render_sample(vec3 *accum_fb, int max_x, int max_y, hittable **world, curandState *rand_state) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
@@ -385,6 +429,7 @@ int main() {
     std::cerr << "Pinned memory: " << (cfg.use_pinned_memory ? "YES" : "NO") << "\n";
     std::cerr << "Constant memory: " << (cfg.use_constant_memory ? "YES" : "NO") << "\n";
     std::cerr << "BVH acceleration: " << (cfg.bvh_optim ? "YES (O(log n))" : "NO (O(n))") << "\n";
+    std::cerr << "Persistent threads: " << (cfg.use_persistent_threads ? "YES (dynamic load balancing)" : "NO") << "\n";
     std::cerr << "Precision: " << (USE_DOUBLE_PRECISION ? "double (64-bit)" : "float (32-bit)") << "\n";
     std::cerr << "================================\n";
 
@@ -539,6 +584,59 @@ int main() {
 
         std::cerr << "\nTo create a GIF showing render progress, run:\n";
         std::cerr << "  python make_gif.py render_progress 1\n";
+
+    } else if (cfg.use_persistent_threads) {
+        // Persistent threads rendering - dynamic load balancing
+        std::cerr << "Starting render with persistent threads...\n";
+
+        // Allocate work counter on device
+        int *d_work_counter;
+        checkCudaErrors(cudaMalloc((void **)&d_work_counter, sizeof(int)));
+        checkCudaErrors(cudaMemset(d_work_counter, 0, sizeof(int)));
+
+        // Calculate grid size: enough blocks to fill the GPU
+        // For H100/A100: ~80-100 SMs, 2048 threads per SM max
+        // We want enough threads to saturate but not too many
+        int threads_per_block = tx * ty;  // 256
+        int num_blocks = 256;  // Enough to saturate GPU (adjust based on GPU)
+
+        dim3 blocks(num_blocks, 1);
+        dim3 thread_dim(threads_per_block, 1);
+
+        render_persistent<<<blocks, thread_dim>>>(d_fb, nx, ny, ns, d_world, d_rand_state,
+                                                   d_work_counter, num_pixels);
+
+        checkCudaErrors(cudaGetLastError());
+        checkCudaErrors(cudaDeviceSynchronize());
+
+        auto end_time = std::chrono::high_resolution_clock::now();
+        double total_time = std::chrono::duration<double>(end_time - start_time).count();
+
+        std::cerr << "Rendering complete!\n";
+        std::cerr << "Total time: " << std::fixed << std::setprecision(2) << total_time << " seconds\n";
+
+        // Cleanup work counter
+        checkCudaErrors(cudaFree(d_work_counter));
+
+        // Copy framebuffer to host
+        if (cfg.use_pinned_memory) {
+            checkCudaErrors(cudaMemcpyAsync(h_fb, d_fb, fb_size, cudaMemcpyDeviceToHost, streams[0]));
+            checkCudaErrors(cudaStreamSynchronize(streams[0]));
+        } else {
+            checkCudaErrors(cudaMemcpy(h_fb, d_fb, fb_size, cudaMemcpyDeviceToHost));
+        }
+
+        // Output final image
+        std::cout << "P3\n" << nx << " " << ny << "\n255\n";
+        for (int j = ny-1; j >= 0; j--) {
+            for (int i = 0; i < nx; i++) {
+                size_t pixel_index = j * nx + i;
+                int ir = int(255.99 * h_fb[pixel_index].x());
+                int ig = int(255.99 * h_fb[pixel_index].y());
+                int ib = int(255.99 * h_fb[pixel_index].z());
+                std::cout << ir << " " << ig << " " << ib << "\n";
+            }
+        }
 
     } else {
         // Fast rendering with streams - divide image into horizontal strips
