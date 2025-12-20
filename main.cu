@@ -12,7 +12,7 @@
 //==============================================================================
 // COMPILE-TIME CONFIGURATION (cannot be changed at runtime)
 //==============================================================================
-#define USE_DOUBLE_PRECISION true // Use double (64-bit) precision. Set to false for float (32-bit)
+#define USE_DOUBLE_PRECISION false // Use double (64-bit) precision. Set to false for float (32-bit)
 //==============================================================================
 
 #include "rtweekend.h"
