@@ -512,7 +512,7 @@ int main() {
     std::cerr << "BVH acceleration: " << (cfg.bvh_optim ? "YES (O(log n))" : "NO (O(n))") << "\n";
     std::cerr << "Persistent threads: " << (cfg.use_persistent_threads ? "YES (per-pixel)" : "NO") << "\n";
     std::cerr << "Tiled persistent: " << (cfg.use_tiled_persistent ? "YES" : "NO");
-    if (cfg.use_tiled_persistent) std::cerr << " (" << cfg.tile_size << "x" << cfg.tile_size << " tiles)";
+    if (cfg.use_tiled_persistent) std::cerr << " (" << cfg.tile_size_x << "x" << cfg.tile_size_y << " tiles)";
     std::cerr << "\n";
     std::cerr << "Precision: " << (USE_DOUBLE_PRECISION ? "double (64-bit)" : "float (32-bit)") << "\n";
     std::cerr << "================================\n";
