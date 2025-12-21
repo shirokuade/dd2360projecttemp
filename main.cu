@@ -63,7 +63,8 @@ struct Config {
     // Persistent threads settings
     bool use_persistent_threads = false;
     bool use_tiled_persistent = false;  // Tiled version (better cache locality)
-    int tile_size = 16;                 // Tile size for tiled persistent (e.g., 16 = 16x16 tiles)
+    int tile_size_x = 16;               // Tile width for tiled persistent
+    int tile_size_y = 16;               // Tile height for tiled persistent
     int num_blocks = 256;               // Number of blocks for persistent/tiled kernels
 };
 
@@ -136,8 +137,10 @@ Config load_config(const std::string& filename) {
             config.use_persistent_threads = parse_bool(value);
         } else if (key == "USE_TILED_PERSISTENT") {
             config.use_tiled_persistent = parse_bool(value);
-        } else if (key == "TILE_SIZE") {
-            config.tile_size = std::stoi(value);
+        } else if (key == "TILE_SIZE_X") {
+            config.tile_size_x = std::stoi(value);
+        } else if (key == "TILE_SIZE_Y") {
+            config.tile_size_y = std::stoi(value);
         } else if (key == "NUM_BLOCKS") {
             config.num_blocks = std::stoi(value);
         }
@@ -381,7 +384,7 @@ __global__ void render_persistent(vec3 *fb, int max_x, int max_y, int ns,
 __global__ void render_tiled_persistent(vec3 *fb, int max_x, int max_y, int ns,
                                          hittable **world, curandState *rand_state,
                                          int *tile_counter, int tiles_x, int tiles_y,
-                                         int tile_size) {
+                                         int tile_size_x, int tile_size_y) {
     // Shared variable for tile index - only one thread per block does atomic
     __shared__ int tile_idx;
 
@@ -406,8 +409,8 @@ __global__ void render_tiled_persistent(vec3 *fb, int max_x, int max_y, int ns,
         if (tile_idx >= total_tiles) return;
 
         // Calculate tile's top-left corner
-        int tile_x = (tile_idx % tiles_x) * tile_size;
-        int tile_y = (tile_idx / tiles_x) * tile_size;
+        int tile_x = (tile_idx % tiles_x) * tile_size_x;
+        int tile_y = (tile_idx / tiles_x) * tile_size_y;
 
         // Calculate this thread's pixel coordinates
         int pixel_x = tile_x + local_x;
@@ -668,8 +671,9 @@ int main() {
 
     } else if (cfg.use_tiled_persistent) {
         // Tiled persistent threads rendering - blocks grab tiles dynamically
-        int tile_size = cfg.tile_size;
-        std::cerr << "Starting render with tiled persistent threads (" << tile_size << "x" << tile_size << " tiles)...\n";
+        int tile_size_x = cfg.tile_size_x;
+        int tile_size_y = cfg.tile_size_y;
+        std::cerr << "Starting render with tiled persistent threads (" << tile_size_x << "x" << tile_size_y << " tiles)...\n";
 
         // Allocate tile counter on device
         int *d_tile_counter;
@@ -677,19 +681,19 @@ int main() {
         checkCudaErrors(cudaMemset(d_tile_counter, 0, sizeof(int)));
 
         // Calculate number of tiles
-        int tiles_x = (nx + tile_size - 1) / tile_size;
-        int tiles_y = (ny + tile_size - 1) / tile_size;
+        int tiles_x = (nx + tile_size_x - 1) / tile_size_x;
+        int tiles_y = (ny + tile_size_y - 1) / tile_size_y;
         int total_tiles = tiles_x * tiles_y;
 
         std::cerr << "Tiles: " << tiles_x << "x" << tiles_y << " = " << total_tiles << " total\n";
 
         // Launch enough blocks to saturate GPU
         // Use 2D thread blocks matching tile dimensions for better coalescing
-        dim3 block_dim(tile_size, tile_size);  // e.g., 16x16 = 256 threads
+        dim3 block_dim(tile_size_x, tile_size_y);  // e.g., 32x8 = 256 threads
 
         render_tiled_persistent<<<cfg.num_blocks, block_dim>>>(
             d_fb, nx, ny, ns, d_world, d_rand_state,
-            d_tile_counter, tiles_x, tiles_y, tile_size);
+            d_tile_counter, tiles_x, tiles_y, tile_size_x, tile_size_y);
 
         checkCudaErrors(cudaGetLastError());
         checkCudaErrors(cudaDeviceSynchronize());
