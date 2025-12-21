@@ -64,6 +64,7 @@ struct Config {
     bool use_persistent_threads = false;
     bool use_tiled_persistent = false;  // Tiled version (better cache locality)
     int tile_size = 16;                 // Tile size for tiled persistent (e.g., 16 = 16x16 tiles)
+    int num_blocks = 256;               // Number of blocks for persistent/tiled kernels
 };
 
 // Trim whitespace from string
@@ -137,6 +138,8 @@ Config load_config(const std::string& filename) {
             config.use_tiled_persistent = parse_bool(value);
         } else if (key == "TILE_SIZE") {
             config.tile_size = std::stoi(value);
+        } else if (key == "NUM_BLOCKS") {
+            config.num_blocks = std::stoi(value);
         }
     }
 
@@ -683,9 +686,8 @@ int main() {
         // Launch enough blocks to saturate GPU
         // Use 2D thread blocks matching tile dimensions for better coalescing
         dim3 block_dim(tile_size, tile_size);  // e.g., 16x16 = 256 threads
-        int num_blocks = 256;  // Enough to saturate GPU
 
-        render_tiled_persistent<<<num_blocks, block_dim>>>(
+        render_tiled_persistent<<<cfg.num_blocks, block_dim>>>(
             d_fb, nx, ny, ns, d_world, d_rand_state,
             d_tile_counter, tiles_x, tiles_y, tile_size);
 
@@ -734,9 +736,8 @@ int main() {
         // For H100/A100: ~80-100 SMs, 2048 threads per SM max
         // We want enough threads to saturate but not too many
         int threads_per_block = tx * ty;  // 256
-        int num_blocks = 256;  // Enough to saturate GPU (adjust based on GPU)
 
-        dim3 blocks(num_blocks, 1);
+        dim3 blocks(cfg.num_blocks, 1);
         dim3 thread_dim(threads_per_block, 1);
 
         render_persistent<<<blocks, thread_dim>>>(d_fb, nx, ny, ns, d_world, d_rand_state,
