@@ -385,15 +385,14 @@ __global__ void render_tiled_persistent(vec3 *fb, int max_x, int max_y, int ns,
     // Total number of tiles
     int total_tiles = tiles_x * tiles_y;
 
-    // Thread's position within the block (for processing pixels within a tile)
-    int local_id = threadIdx.x;
-    int local_x = local_id % tile_size;
-    int local_y = local_id / tile_size;
+    // Thread's position within the block (using 2D indexing for better coalescing)
+    int local_x = threadIdx.x;
+    int local_y = threadIdx.y;
 
     // Loop: each iteration, the block grabs a new tile
     while (true) {
-        // Thread 0 grabs the next tile atomically
-        if (threadIdx.x == 0) {
+        // Thread (0,0) grabs the next tile atomically
+        if (threadIdx.x == 0 && threadIdx.y == 0) {
             tile_idx = atomicAdd(tile_counter, 1);
         }
 
@@ -682,11 +681,11 @@ int main() {
         std::cerr << "Tiles: " << tiles_x << "x" << tiles_y << " = " << total_tiles << " total\n";
 
         // Launch enough blocks to saturate GPU
-        // Each block has tile_size * tile_size threads
-        int threads_per_block = tile_size * tile_size;
+        // Use 2D thread blocks matching tile dimensions for better coalescing
+        dim3 block_dim(tile_size, tile_size);  // e.g., 16x16 = 256 threads
         int num_blocks = 256;  // Enough to saturate GPU
 
-        render_tiled_persistent<<<num_blocks, threads_per_block>>>(
+        render_tiled_persistent<<<num_blocks, block_dim>>>(
             d_fb, nx, ny, ns, d_world, d_rand_state,
             d_tile_counter, tiles_x, tiles_y, tile_size);
 
