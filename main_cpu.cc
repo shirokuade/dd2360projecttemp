@@ -12,7 +12,7 @@
 #include "rtweekend.h"
 
 #include "bvh.h"
-#include "camera.h"
+#include "camera_cpu.h"
 #include "constant_medium.h"
 #include "hittable.h"
 #include "hittable_list.h"
@@ -20,6 +20,9 @@
 #include "quad.h"
 #include "sphere.h"
 #include "texture.h"
+
+// Configuration
+bool progressive = false;  // Set to true to enable progressive rendering with frame capture
 
 
 void bouncing_spheres() {
@@ -84,6 +87,7 @@ void bouncing_spheres() {
     cam.defocus_angle = 0.6;
     cam.focus_dist    = 10.0;
 
+    cam.progressive_render = progressive;
     cam.render(world);
 }
 
@@ -111,6 +115,7 @@ void checkered_spheres() {
 
     cam.defocus_angle = 0;
 
+    cam.progressive_render = progressive;
     cam.render(world);
 }
 
@@ -135,6 +140,7 @@ void earth() {
 
     cam.defocus_angle = 0;
 
+    cam.progressive_render = progressive;
     cam.render(hittable_list(globe));
 }
 
@@ -161,6 +167,7 @@ void perlin_spheres() {
 
     cam.defocus_angle = 0;
 
+    cam.progressive_render = progressive;
     cam.render(world);
 }
 
@@ -197,6 +204,7 @@ void quads() {
 
     cam.defocus_angle = 0;
 
+    cam.progressive_render = progressive;
     cam.render(world);
 }
 
@@ -227,6 +235,7 @@ void simple_light() {
 
     cam.defocus_angle = 0;
 
+    cam.progressive_render = progressive;
     cam.render(world);
 }
 
@@ -271,6 +280,7 @@ void cornell_box() {
 
     cam.defocus_angle = 0;
 
+    cam.progressive_render = progressive;
     cam.render(world);
 }
 
@@ -316,6 +326,7 @@ void cornell_smoke() {
 
     cam.defocus_angle = 0;
 
+    cam.progressive_render = progressive;
     cam.render(world);
 }
 
@@ -396,6 +407,7 @@ void final_scene(int image_width, int samples_per_pixel, int max_depth) {
 
     cam.defocus_angle = 0;
 
+    cam.progressive_render = progressive;
     cam.render(world);
 }
 
